@@ -1,23 +1,31 @@
 // login_headful.js
-// Headful (local) / headless-ish (CI) login script, with fresh profile.
-// Local: interactive, CI: non-interactive.
+// Fresh profile + Gemini login + zip profile + upload to GitHub release
 
 const puppeteer = require("puppeteer");
 const fs = require("fs");
+const path = require("path");
 const readline = require("readline");
+const archiver = require("archiver");
 
 // ======= CONFIG =======
-// Email / password priority: ENV vars, warna hardcoded fallback (local testing)
+
+// Email / password
 const EMAIL = process.env.GEMINI_EMAIL || "admin@veocraftai.live";
 const PASSWORD =
-  process.env.GEMINI_PASSWORD || "HafsaHaris11$$"; // local mein change karo
+  process.env.GEMINI_PASSWORD || "HafsaHaris11$$"; // <-- local use ke liye change karna
 
 const GEMINI_URL = "https://business.gemini.google/";
 const PROFILE_DIR = "C:\\selenium_gemini_profile";
 const BROWSER_PATH =
   "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 
-// CI mode? (GitHub Actions automatically CI=true set karta hai)
+// GitHub config (auto set inside Actions)
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY; // "owner/repo"
+const TAG_NAME = "gemini-profile-latest";
+const RELEASE_NAME = "Gemini Profile Latest";
+
+// Local vs CI
 const IS_CI = process.env.CI === "true";
 
 // ---------- sleep helper ----------
@@ -27,10 +35,7 @@ function sleep(ms) {
 
 // ---------- askQuestion (local only) ----------
 function askQuestion(query) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) =>
     rl.question(query, (ans) => {
       rl.close();
@@ -167,8 +172,167 @@ async function ensureLoggedIn(page) {
   }
 }
 
+// ---------- ZIP HELPER ----------
+function zipFolder(sourceDir, outPath) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(outPath);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+
+    output.on("close", () => {
+      console.log(`Profile zipped: ${outPath} (${archive.pointer()} bytes)`);
+      resolve();
+    });
+    archive.on("error", (err) => reject(err));
+
+    archive.pipe(output);
+    archive.directory(sourceDir, false);
+    archive.finalize();
+  });
+}
+
+// ---------- GITHUB API HELPERS ----------
+function getGitHubInfo() {
+  if (!GITHUB_TOKEN || !GITHUB_REPOSITORY) {
+    console.log(
+      "GITHUB_TOKEN or GITHUB_REPOSITORY missing. Skipping GitHub release upload."
+    );
+    return null;
+  }
+  const [owner, repo] = GITHUB_REPOSITORY.split("/");
+  if (!owner || !repo) {
+    console.log("Invalid GITHUB_REPOSITORY format. Skipping release upload.");
+    return null;
+  }
+  return { owner, repo };
+}
+
+async function githubRequest(method, url, body) {
+  const info = getGitHubInfo();
+  if (!info) throw new Error("GitHub info missing");
+
+  const headers = {
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    "User-Agent": "gemini-profile-bot",
+    Accept: "application/vnd.github+json",
+  };
+
+  let options = { method, headers };
+
+  if (body && typeof body === "object" && !(body instanceof Buffer)) {
+    options.body = JSON.stringify(body);
+    headers["Content-Type"] = "application/json";
+  } else if (body instanceof Buffer) {
+    options.body = body;
+  }
+
+  const res = await fetch(url, options);
+  return res;
+}
+
+async function deleteExistingReleaseIfAny() {
+  const info = getGitHubInfo();
+  if (!info) return;
+
+  const { owner, repo } = info;
+  const url = `https://api.github.com/repos/${owner}/${repo}/releases/tags/${TAG_NAME}`;
+
+  console.log(`Checking existing release with tag: ${TAG_NAME}`);
+  const res = await githubRequest("GET", url);
+  if (res.status === 404) {
+    console.log("No existing release with this tag.");
+    return;
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    console.log("Error checking existing release:", res.status, text);
+    return;
+  }
+
+  const data = await res.json();
+  const releaseId = data.id;
+  console.log(`Existing release found. ID: ${releaseId}. Deleting it...`);
+
+  // Delete release
+  const delRel = await githubRequest(
+    "DELETE",
+    `https://api.github.com/repos/${owner}/${repo}/releases/${releaseId}`
+  );
+  if (!delRel.ok) {
+    const t = await delRel.text();
+    console.log("Error deleting release:", delRel.status, t);
+  } else {
+    console.log("Old release deleted.");
+  }
+
+  // Delete tag ref
+  const delTag = await githubRequest(
+    "DELETE",
+    `https://api.github.com/repos/${owner}/${repo}/git/refs/tags/${TAG_NAME}`
+  );
+  if (!delTag.ok && delTag.status !== 404) {
+    const t = await delTag.text();
+    console.log("Error deleting tag:", delTag.status, t);
+  } else {
+    console.log("Tag deleted (or did not exist).");
+  }
+}
+
+async function createReleaseAndUpload(zipPath) {
+  const info = getGitHubInfo();
+  if (!info) return;
+  const { owner, repo } = info;
+
+  console.log("Creating new release...");
+
+  const createRes = await githubRequest(
+    "POST",
+    `https://api.github.com/repos/${owner}/${repo}/releases`,
+    {
+      tag_name: TAG_NAME,
+      name: RELEASE_NAME,
+      body: "Auto-uploaded Gemini profile zip.",
+      draft: false,
+      prerelease: false,
+    }
+  );
+
+  if (!createRes.ok) {
+    const text = await createRes.text();
+    console.log("Error creating release:", createRes.status, text);
+    return;
+  }
+
+  const relData = await createRes.json();
+  const releaseId = relData.id;
+  console.log("Release created. ID:", releaseId);
+
+  const fileData = fs.readFileSync(zipPath);
+  const assetName = path.basename(zipPath);
+  const uploadUrl = `https://uploads.github.com/repos/${owner}/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(
+    assetName
+  )}`;
+
+  console.log("Uploading asset:", assetName);
+
+  const uploadRes = await githubRequest("POST", uploadUrl, fileData);
+  if (!uploadRes.ok) {
+    const text = await uploadRes.text();
+    console.log("Error uploading asset:", uploadRes.status, text);
+    return;
+  }
+
+  console.log("Asset uploaded successfully to release.");
+}
+
 // ---------- MAIN ----------
 async function main() {
+  // Check fetch availability (Node 18+)
+  if (typeof fetch !== "function") {
+    console.warn(
+      "Global fetch is not available. Use Node 18+ or add a fetch polyfill."
+    );
+  }
+
   // 1. Delete old profile + recreate
   deleteProfileFolder();
 
@@ -180,7 +344,6 @@ async function main() {
     headless: IS_CI, // local: UI visible, CI: headless
     executablePath: BROWSER_PATH,
     userDataDir: PROFILE_DIR,
-    // CI pe agar Edge/Chrome nahi mila to yahan adjust karna padega
   });
 
   const page = await browser.newPage();
@@ -209,6 +372,33 @@ async function main() {
   }
 
   await browser.close();
+  console.log("Browser closed.");
+
+  // 2. ZIP profile
+  const zipPath = path.join(process.cwd(), "gemini_profile.zip");
+  try {
+    console.log("Zipping profile folder...");
+    await zipFolder(PROFILE_DIR, zipPath);
+  } catch (e) {
+    console.log("Error while zipping profile:", e);
+    return;
+  }
+
+  // 3. GitHub release (delete old + create new + upload)
+  try {
+    if (!GITHUB_TOKEN || !GITHUB_REPOSITORY) {
+      console.log(
+        "GITHUB_TOKEN or GITHUB_REPOSITORY not set. Skipping GitHub release upload."
+      );
+    } else {
+      await deleteExistingReleaseIfAny();
+      await createReleaseAndUpload(zipPath);
+    }
+  } catch (e) {
+    console.log("Error while handling GitHub release:", e);
+  }
+
+  console.log("\n✅ login_headful.js finished.");
 }
 
 main().catch((err) => console.error("Fatal:", err));
