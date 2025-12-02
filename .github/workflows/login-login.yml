@@ -1,0 +1,34 @@
+name: Run Gemini Login (login_headful.js)
+
+on:
+  workflow_dispatch: {}   # manually trigger from GitHub UI
+
+jobs:
+  login:
+    # ❗ Recommended: self-hosted Windows runner jahan Edge installed ho
+    runs-on: self-hosted
+    # Agar tumne runner ko label diya ho (e.g. windows-edge), to yahan:
+    # runs-on: [self-hosted, windows, edge]
+
+    env:
+      # CI flag Node script ke liye
+      CI: "true"
+      GEMINI_EMAIL: ${{ secrets.GEMINI_EMAIL }}
+      GEMINI_PASSWORD: ${{ secrets.GEMINI_PASSWORD }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+        # ya agar package-lock.json hai:
+        # run: npm ci
+
+      - name: Run login_headful.js (CI mode)
+        run: node login_headful.js
