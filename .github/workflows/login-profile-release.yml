@@ -1,0 +1,29 @@
+name: Gemini Login + Profile Release
+
+on:
+  workflow_dispatch: {}   # manually trigger
+
+jobs:
+  login-and-release:
+    runs-on: self-hosted  # tumhara Windows runner jahan Edge + profile path available ho
+
+    env:
+      CI: "true"
+      GEMINI_EMAIL: ${{ secrets.GEMINI_EMAIL }}
+      GEMINI_PASSWORD: ${{ secrets.GEMINI_PASSWORD }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # or use default: ${{ github.token }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm install
+
+      - name: Run login_headful.js
+        run: node login_headful.js
