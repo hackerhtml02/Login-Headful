@@ -838,10 +838,10 @@ async function main() {
         }
 
         // ============================================
-        // 🔄 CHECK: 5 VIDEOS ACCOUNT RESET LOGIC
+        // 🔄 CHECK: 10 VIDEOS ACCOUNT RESET LOGIC
         // ============================================
-        if (start > 0 && start % 5 === 0) {
-           console.log(`⚠️ 5 Videos Threshold Reached (Current Index: ${start}). Performing Account Reset Check...`);
+        if (start > 0 && start % 10 === 0) {
+           console.log(`⚠️ 10 Videos Threshold Reached (Current Index: ${start}). Performing Account Reset Check...`);
            await handleAccountReset(firstPage);
            await sleep(5000);
         }
