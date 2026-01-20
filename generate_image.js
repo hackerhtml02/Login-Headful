@@ -807,10 +807,10 @@ async function main() {
         }
 
         // ============================================
-        // 🔄 CHECK: 5 IMAGES ACCOUNT RESET LOGIC
+        // 🔄 CHECK: 10 IMAGES ACCOUNT RESET LOGIC
         // ============================================
-        if (start > 0 && start % 5 === 0) {
-          console.log(`⚠️ 5 Images Threshold Reached (Current Index: ${start}). Performing Account Reset Check...`);
+        if (start > 0 && start % 10 === 0) {
+          console.log(`⚠️ 10 Images Threshold Reached (Current Index: ${start}). Performing Account Reset Check...`);
           await handleAccountReset(firstPage);
           await sleep(5000);
         }
