@@ -627,7 +627,7 @@ async function openToolsAndClickGenerate(page) {
     const items = findMenuItemsInShadows();
     if (!items.length) return false;
 
-    const TARGET_TEXT = "Generate a video";
+    const TARGET_TEXT = "Create videos with Veo";
     for (let i = 0; i < items.length; i++) {
       const txt = (items[i].innerText || "").trim();
       if (txt.includes(TARGET_TEXT)) {
