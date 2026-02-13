@@ -43,7 +43,7 @@ const JOB_META_PATH = argMap.jobMeta || process.env.JOB_META_PATH || null;
 const USER_DATA_DIR =
   argMap.userDataDir || process.env.USER_DATA_DIR || path.join(process.cwd(), "gemini_profile");
 
-let maxTabs = parseInt(argMap.maxTabs || process.env.MAX_TABS || "1", 10);
+let maxTabs = parseInt(argMap.maxTabs || process.env.MAX_TABS || "1", 5);
 if (isNaN(maxTabs) || maxTabs <= 0) maxTabs = 1;
 if (maxTabs > 100) maxTabs = 100;
 
@@ -672,8 +672,8 @@ async function main() {
         const firstPage = pages[0];
         if (firstPage) await firstPage.bringToFront();
 
-        if (start > 0 && start % 10 === 0) {
-          console.log(`⚠️ 10 images threshold (${start}). Reset check...`);
+        if (start > 0 && start % 5 === 0) {
+          console.log(`⚠️ 5 images threshold (${start}). Reset check...`);
           await handleAccountReset(firstPage);
           await sleep(5000);
         }
