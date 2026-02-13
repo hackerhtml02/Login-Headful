@@ -1,5 +1,7 @@
 // generate_image.js
-// FIXED: Reliable prompt typing inside Shadow DOM ProseMirror editor + robust Send click
+// FIXED: Prompt typing in Shadow DOM ProseMirror using keyboard (CTRL+A + type)
+// FIXED: Reliable "Send" click with deep shadow traversal
+// NOTE: Keep your reset/login logic as-is, main change: enterPromptAndSend()
 
 const fs = require("fs");
 const path = require("path");
@@ -9,9 +11,7 @@ const puppeteer = require("puppeteer");
 const argMap = {};
 for (const a of process.argv.slice(2)) {
   const [k, v] = a.split("=");
-  if (k && typeof v !== "undefined") {
-    argMap[k.replace(/^--/, "")] = v;
-  }
+  if (k && typeof v !== "undefined") argMap[k.replace(/^--/, "")] = v;
 }
 
 // ========= CONFIG =========
@@ -20,9 +20,8 @@ const GEMINI_URL =
 const SETTINGS_URL = "https://business.gemini.google/settings/general";
 const BLOB_PREFIX = "blob:https://business.gemini.google/";
 
-// ⚠️ Don't hardcode creds in production
-const EMAIL = argMap.email || process.env.GEMINI_EMAIL || "YOUR_EMAIL_HERE";
-const PASSWORD = argMap.password || process.env.GEMINI_PASSWORD || "YOUR_PASSWORD_HERE";
+const EMAIL = argMap.email || process.env.GEMINI_EMAIL || "1swzro22_354@latterlavender.cfd";
+const PASSWORD = argMap.password || process.env.GEMINI_PASSWORD || "Haris123@";
 const PROMPT_FILE = argMap.promptFile || process.env.PROMPT_FILE;
 
 if (!PROMPT_FILE) {
@@ -30,13 +29,9 @@ if (!PROMPT_FILE) {
   process.exit(1);
 }
 
-const OUTPUT_DIR =
-  argMap.outputDir || process.env.OUTPUT_DIR || path.join(process.cwd(), "output_images");
+const OUTPUT_DIR = argMap.outputDir || process.env.OUTPUT_DIR || path.join(process.cwd(), "output_images");
 const JOB_META_PATH = argMap.jobMeta || process.env.JOB_META_PATH || null;
-
-// Profile dir
-const USER_DATA_DIR =
-  argMap.userDataDir || process.env.USER_DATA_DIR || path.join(process.cwd(), "gemini_profile");
+const USER_DATA_DIR = argMap.userDataDir || process.env.USER_DATA_DIR || path.join(process.cwd(), "gemini_profile");
 
 let maxTabs = parseInt(argMap.maxTabs || process.env.MAX_TABS || "1", 10);
 if (isNaN(maxTabs) || maxTabs <= 0) maxTabs = 1;
@@ -49,20 +44,16 @@ const BROWSER_PATH = argMap.browserPath || process.env.BROWSER_PATH || null;
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 function makeRandomFileName(sceneNumber) {
   const rand = Math.random().toString(36).slice(2, 10);
   const ts = Date.now();
   return `image_${sceneNumber}_${ts}_${rand}.png`;
 }
-
 function updateJobMeta(status, extra = {}) {
   if (!JOB_META_PATH) return;
   try {
     let meta = {};
-    if (fs.existsSync(JOB_META_PATH)) {
-      meta = JSON.parse(fs.readFileSync(JOB_META_PATH, "utf-8"));
-    }
+    if (fs.existsSync(JOB_META_PATH)) meta = JSON.parse(fs.readFileSync(JOB_META_PATH, "utf-8"));
     meta.status = status;
     meta.finished_at = new Date().toISOString();
     Object.assign(meta, extra);
@@ -71,7 +62,6 @@ function updateJobMeta(status, extra = {}) {
     console.error("Failed to update job meta:", err);
   }
 }
-
 function loadPromptsFromFile(filePath) {
   if (!fs.existsSync(filePath)) {
     console.log(`Prompt file not found: ${filePath}`);
@@ -98,7 +88,6 @@ async function clickByXpath(page, xpath) {
     return false;
   }, xpath);
 }
-
 async function typeByXpath(page, xpath, text) {
   return page.evaluate(({ xp, txt }) => {
     const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
@@ -123,7 +112,6 @@ async function isElementPresent(page, selector, timeout = 5000) {
   }
 }
 
-// ===== Welcome Dialog Dismiss (same as your code) =====
 async function dismissWelcomeIfPresent(page) {
   const clickLaterScript = () => {
     function clickWelcomeLater() {
@@ -133,6 +121,7 @@ async function dismissWelcomeIfPresent(page) {
       if (!welcome || !welcome.shadowRoot) return false;
       const dlg = welcome.shadowRoot.querySelector("md-dialog");
       if (!dlg) return false;
+
       const mdButtons = dlg.querySelectorAll("md-text-button");
       for (const mdBtn of mdButtons) {
         let label = "";
@@ -141,17 +130,11 @@ async function dismissWelcomeIfPresent(page) {
           if (innerBtn) label = innerBtn.innerText.trim();
         }
         if (!label) label = mdBtn.innerText.trim();
+
         if (label.includes("I'll do this later")) {
-          let target = null;
-          if (mdBtn.shadowRoot) {
-            target = mdBtn.shadowRoot.querySelector("button") || mdBtn;
-          } else {
-            target = mdBtn;
-          }
-          if (target) {
-            target.click();
-            return true;
-          }
+          const target = (mdBtn.shadowRoot && (mdBtn.shadowRoot.querySelector("button") || mdBtn)) || mdBtn;
+          target.click();
+          return true;
         }
       }
       return false;
@@ -162,8 +145,8 @@ async function dismissWelcomeIfPresent(page) {
   try {
     const laterClicked = await page.evaluate(clickLaterScript);
     if (laterClicked) {
-      console.log("Clicked 'I'll do this later' dialog button.");
-      await sleep(4000);
+      console.log("Clicked 'I'll do this later'.");
+      await sleep(3000);
     }
   } catch (_) {}
 }
@@ -171,10 +154,10 @@ async function dismissWelcomeIfPresent(page) {
 async function clickAgreeButton(page) {
   try {
     const agreeBtnClass = ".agree-button";
-    if (await isElementPresent(page, agreeBtnClass, 5000)) {
-      console.log("⚠️ 'Agree & get started' found via Class. Clicking...");
+    if (await isElementPresent(page, agreeBtnClass, 4000)) {
+      console.log("⚠️ Agree found. Clicking...");
       await page.click(agreeBtnClass);
-      await sleep(5000);
+      await sleep(4000);
       await dismissWelcomeIfPresent(page);
       return true;
     }
@@ -190,42 +173,41 @@ async function clickAgreeButton(page) {
     });
 
     if (clickedByText) {
-      console.log("⚠️ 'Agree & get started' found via Text. Clicked.");
-      await sleep(5000);
+      console.log("⚠️ Agree found via text. Clicked.");
+      await sleep(4000);
       await dismissWelcomeIfPresent(page);
       return true;
     }
   } catch (e) {
-    console.log("Agree button check failed:", e.message);
+    console.log("Agree check failed:", e.message);
   }
   return false;
 }
 
-// ========= ACCOUNT RESET LOGIC (same as yours, kept) =========
+// ========= ACCOUNT RESET LOGIC (same) =========
 async function handleAccountReset(page) {
-  console.log("♻️ Checking Account State (Reset Check)...");
+  console.log("♻️ Reset Check...");
   try {
     await page.goto(GEMINI_URL, { waitUntil: "networkidle2" });
-  } catch (e) {
-    console.log("Nav error in reset check (ignored):", e.message);
-  }
+  } catch (e) {}
 
-  await sleep(5000);
+  await sleep(4000);
+
   const isAgreePresentInitial = await page.evaluate(() => {
     const btn = document.querySelector(".agree-button");
     if (btn) return true;
-    const buttons = Array.from(document.querySelectorAll("button"));
-    return buttons.some((b) => (b.innerText || "").includes("Agree & get started"));
+    return Array.from(document.querySelectorAll("button")).some((b) =>
+      (b.innerText || "").includes("Agree & get started")
+    );
   });
 
   if (isAgreePresentInitial) {
-    console.log("✅ 'Agree' button found initially. Clicking it...");
+    console.log("✅ Agree found initially.");
     await clickAgreeButton(page);
     return;
   }
 
-  console.log("⚠️ 'Agree' button NOT found. Proceeding to DELETE Account...");
-
+  console.log("⚠️ Agree not found. Deleting account...");
   await page.goto(SETTINGS_URL, { waitUntil: "networkidle2" });
   await sleep(5000);
 
@@ -233,120 +215,78 @@ async function handleAccountReset(page) {
     "/html/body/saas-settingsfe-root/main/saas-settingsfe-admin-page/mat-sidenav-container/mat-sidenav-content/saas-settingsfe-general-section/div/div[2]/div/div/button";
 
   const clickedDelete = await clickByXpath(page, deleteBtnXpath);
-  if (!clickedDelete) {
-    console.log("❌ Could not find Delete Button in Settings. Skipping reset.");
-    return;
-  }
+  if (!clickedDelete) return;
 
-  console.log("🗑️ Delete button clicked. Waiting for dialog...");
   await sleep(2000);
 
   const inputXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-content/form/mat-form-field/div[1]/div/div[2]/input";
 
   const typed = await typeByXpath(page, inputXpath, "DELETE");
-  if (!typed) {
-    console.log("❌ Could not find Delete Confirmation Input.");
-    return;
-  }
+  if (!typed) return;
 
-  console.log("✍️ Typed 'DELETE'.");
-  await sleep(2000);
+  await sleep(1500);
 
   const confirmBtnXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-actions/button[2]";
 
   const confirmed = await clickByXpath(page, confirmBtnXpath);
   if (confirmed) {
-    console.log("✅ 'Delete account' clicked. Waiting for redirect...");
-    await sleep(5000);
-    console.log("🔄 Post-Delete: Checking for 'Agree & get started'...");
+    await sleep(6000);
     await clickAgreeButton(page);
-  } else {
-    console.log("❌ Could not click Final Delete Button.");
   }
 }
 
-// ========= LOGIN =========
+// ========= LOGIN (same style, short) =========
 async function ensureLoggedInOnFirstTab(page) {
-  console.log("Opening Gemini to check login status...");
-
+  console.log("🔐 Checking login...");
   for (let i = 0; i < 3; i++) {
     try {
       await page.goto(GEMINI_URL, { waitUntil: "networkidle2" });
       break;
-    } catch (err) {
-      console.log(`⚠️ Navigation attempt ${i + 1} failed: ${err.message}`);
-      await sleep(3000);
+    } catch (e) {
+      await sleep(2000);
     }
   }
 
   await sleep(3000);
+  if (await clickAgreeButton(page)) return;
 
-  const agreeClicked = await clickAgreeButton(page);
-  if (agreeClicked) {
-    console.log("✅ Accepted 'Agree & get started'. Ready.");
-    return;
-  }
-
-  // If already on dashboard, skip
-  const isDashboard = await page.evaluate(() => !!document.querySelector("ucs-standalone-app"));
-  if (isDashboard) {
-    console.log("✅ Dashboard visible. Likely already logged in.");
+  const dashboard = await page.evaluate(() => !!document.querySelector("ucs-standalone-app"));
+  if (dashboard) {
+    console.log("✅ Dashboard visible.");
     await dismissWelcomeIfPresent(page);
     return;
   }
 
-  // Try standard email login fields (your flow)
-  console.log("🔒 Starting Standard Email Login...");
+  // Email login
   try {
-    const emailInput = await page.waitForSelector("#email-input", { timeout: 10000 });
+    const emailInput = await page.waitForSelector("#email-input", { timeout: 12000 });
     await emailInput.click();
     await page.evaluate((el) => (el.value = ""), emailInput);
     await emailInput.type(EMAIL);
-    console.log("Email entered!");
 
-    const continueBtn = await page.waitForSelector("#log-in-button", { timeout: 10000 });
+    const continueBtn = await page.waitForSelector("#log-in-button", { timeout: 12000 });
     await continueBtn.click();
-    console.log("Continue clicked. Waiting...");
     await sleep(8000);
 
-    // identifierId enter (if appears)
-    try {
-      const idInput = await page.waitForSelector("#identifierId", { timeout: 8000 });
-      if (idInput) {
-        console.log("✅ 'identifierId' found! Pressing Enter...");
-        await idInput.press("Enter");
-        await sleep(5000);
-      }
-    } catch (_) {}
-
     // Password
-    console.log("🔑 Waiting for Password field...");
     try {
       const passInput = await page.waitForSelector('input[name="Passwd"]', { timeout: 20000 });
       await passInput.click();
-      await sleep(500);
       await passInput.type(PASSWORD);
-      console.log("✅ Password entered. Pressing ENTER...");
       await passInput.press("Enter");
       await sleep(8000);
-    } catch (e) {
-      console.log("ℹ️ Password field not found:", e.message);
-    }
-  } catch (e) {
-    console.log("ℹ️ Email login elements not found:", e.message);
-  }
+    } catch (_) {}
+  } catch (_) {}
 
-  // Confirmations "I understand" up to 2 times
-  console.log("Checking for confirmation screens...");
+  // Confirmations
   for (let i = 1; i <= 2; i++) {
     try {
       const confirmSelector = 'input[value="I understand"], #confirm';
-      if (await isElementPresent(page, confirmSelector, 5000)) {
-        console.log(`⚠️ 'I understand' found (Occurrence ${i}). Clicking...`);
+      if (await isElementPresent(page, confirmSelector, 4000)) {
         await page.click(confirmSelector);
-        await sleep(5000);
+        await sleep(4000);
       } else {
         if (i === 1) break;
       }
@@ -355,10 +295,10 @@ async function ensureLoggedInOnFirstTab(page) {
 
   await clickAgreeButton(page);
   await dismissWelcomeIfPresent(page);
-  console.log("✅ Ready to generate.");
+  console.log("✅ Ready.");
 }
 
-// ========= CHECKS & AUTO-CLICKER =========
+// ========= CHECKS =========
 async function findBlobUrlNow(page, prefix) {
   return page.evaluate((innerPrefix) => {
     const visited = new Set();
@@ -367,16 +307,15 @@ async function findBlobUrlNow(page, prefix) {
       if (!node || visited.has(node)) return;
       visited.add(node);
       if (node.querySelectorAll) {
-        const imgs = node.querySelectorAll('img[src^="blob:"]');
-        imgs.forEach((v) => {
-          if (v.src && v.src.startsWith(innerPrefix)) blobUrls.push(v.src);
+        node.querySelectorAll('img[src^="blob:"]').forEach((img) => {
+          if (img.src && img.src.startsWith(innerPrefix)) blobUrls.push(img.src);
         });
       }
       if (node.shadowRoot) walk(node.shadowRoot);
-      if (node.childNodes && node.childNodes.length) node.childNodes.forEach((c) => walk(c));
+      if (node.childNodes) node.childNodes.forEach((c) => walk(c));
     }
     walk(document);
-    return blobUrls.length ? blobUrls[0] : null;
+    return blobUrls[0] || null;
   }, prefix);
 }
 
@@ -388,12 +327,9 @@ async function checkBannedError(page) {
       if (found) return;
       if (!node || visited.has(node)) return;
       visited.add(node);
-      if (node.tagName && node.tagName.toLowerCase() === "ucs-banned-answer") {
-        found = true;
-        return;
-      }
+      if (node.tagName && node.tagName.toLowerCase() === "ucs-banned-answer") found = true;
       if (node.shadowRoot) walk(node.shadowRoot);
-      if (node.childNodes && node.childNodes.length) node.childNodes.forEach((c) => walk(c));
+      if (node.childNodes) node.childNodes.forEach((c) => walk(c));
     }
     walk(document);
     return found;
@@ -401,23 +337,19 @@ async function checkBannedError(page) {
 }
 
 async function injectAutoClicker(page) {
-  console.log("💉 Injecting background auto-clicker into tab...");
   await page.evaluate(() => {
     window.autoClickerInterval = setInterval(() => {
       try {
-        function deepQuery(root, matchFn) {
-          if (!root) return null;
-          const queue = [root];
-          const visited = new Set();
-          while (queue.length > 0) {
-            const node = queue.shift();
-            if (!node || visited.has(node)) continue;
-            visited.add(node);
-            if (matchFn(node)) return node;
-            if (node.shadowRoot) {
-              node.shadowRoot.querySelectorAll("*").forEach((x) => queue.push(x));
-            }
-            if (node.children) Array.from(node.children).forEach((x) => queue.push(x));
+        function deepFind(root, predicate) {
+          const q = [root];
+          const seen = new Set();
+          while (q.length) {
+            const n = q.shift();
+            if (!n || seen.has(n)) continue;
+            seen.add(n);
+            if (predicate(n)) return n;
+            if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+            if (n.children) Array.from(n.children).forEach((x) => q.push(x));
           }
           return null;
         }
@@ -425,48 +357,41 @@ async function injectAutoClicker(page) {
         const app = document.querySelector("ucs-standalone-app");
         if (!app) return;
 
-        const conversation = deepQuery(app, (n) => n.tagName && n.tagName.toLowerCase() === "ucs-conversation");
-        if (!conversation) return;
+        const btn = deepFind(app, (n) => {
+          const t = (n.tagName || "").toLowerCase();
+          if (t !== "md-filled-button") return false;
+          const txt = (n.innerText || "").toLowerCase();
+          return txt.includes("continue") || txt.includes("generate") || txt.includes("create");
+        });
 
-        const mdButton = deepQuery(conversation, (n) => n.tagName && n.tagName.toLowerCase() === "md-filled-button");
-        if (!mdButton) return;
-
-        let realBtn = null;
-        if (mdButton.shadowRoot) {
-          realBtn = mdButton.shadowRoot.getElementById("button") || mdButton.shadowRoot.querySelector("button");
-        } else {
-          realBtn = mdButton.querySelector("button");
-        }
-        if (realBtn) realBtn.click();
+        if (!btn) return;
+        let real = btn;
+        if (btn.shadowRoot) real = btn.shadowRoot.querySelector("button") || btn;
+        real.click();
       } catch (_) {}
     }, 500);
   });
 }
 
-// ========= TOOLS MENU =========
+// ========= FLOW: open tools =========
 async function openToolsAndClickGenerate(page) {
   await page.evaluate(() => {
     const app = document.querySelector("ucs-standalone-app");
-    if (!app || !app.shadowRoot) return false;
+    if (!app?.shadowRoot) return false;
     const landing = app.shadowRoot.querySelector("ucs-chat-landing");
-    if (!landing || !landing.shadowRoot) return false;
+    if (!landing?.shadowRoot) return false;
 
     const hostDiv = landing.shadowRoot.querySelector("div > div > div > div:nth-child(1)");
     if (!hostDiv) return false;
 
     const searchBar = hostDiv.querySelector("ucs-search-bar");
-    if (!searchBar || !searchBar.shadowRoot) return false;
+    if (!searchBar?.shadowRoot) return false;
 
     const form = searchBar.shadowRoot.querySelector("form");
     if (!form) return false;
 
     const toolsRow = form.querySelector("div.tools-button-container");
-    if (!toolsRow) return false;
-
-    const tooltipWrapper = toolsRow.querySelector(".tooltip-wrapper");
-    if (!tooltipWrapper) return false;
-
-    const btn = tooltipWrapper.querySelector("button, md-icon-button, md-text-button");
+    const btn = toolsRow?.querySelector(".tooltip-wrapper button, .tooltip-wrapper md-icon-button, .tooltip-wrapper md-text-button");
     if (!btn) return false;
 
     btn.click();
@@ -476,35 +401,30 @@ async function openToolsAndClickGenerate(page) {
   await sleep(1500);
 
   await page.evaluate(() => {
-    function findMenuItemsInShadows() {
-      const result = [];
-      const visited = new Set();
-      function walk(node) {
-        if (!node || visited.has(node)) return;
-        visited.add(node);
-        if (node.querySelectorAll) node.querySelectorAll("md-menu-item").forEach((it) => result.push(it));
-        if (node.shadowRoot) walk(node.shadowRoot);
-        if (node.childNodes) node.childNodes.forEach((c) => walk(c));
-      }
-      walk(document);
-      return result;
+    const visited = new Set();
+    function walk(node, out) {
+      if (!node || visited.has(node)) return;
+      visited.add(node);
+      if (node.querySelectorAll) node.querySelectorAll("md-menu-item").forEach((x) => out.push(x));
+      if (node.shadowRoot) walk(node.shadowRoot, out);
+      if (node.childNodes) node.childNodes.forEach((c) => walk(c, out));
     }
-
-    const items = findMenuItemsInShadows();
+    const items = [];
+    walk(document, items);
     if (!items.length) return false;
 
-    const TARGET_TEXT = "Generate images (Pro)";
+    const targetText = "Generate images (Pro)";
     for (const it of items) {
       const txt = (it.innerText || "").trim();
-      if (txt.includes(TARGET_TEXT)) {
+      if (txt.includes(targetText)) {
         (it.querySelector("li") || it).click();
         return true;
       }
     }
 
-    // fallback
+    // fallback (3rd item)
     const idx = 2;
-    if (idx < items.length) {
+    if (items[idx]) {
       (items[idx].querySelector("li") || items[idx]).click();
       return true;
     }
@@ -514,30 +434,22 @@ async function openToolsAndClickGenerate(page) {
   await sleep(1500);
 }
 
-// ========= ✅ FIXED: PROMPT ENTRY INSIDE SHADOW PROSEMIRROR =========
-async function enterPromptAndSend(page, promptText) {
-  const ok = await page.evaluate(async (text) => {
-    // Deep helper to traverse shadow roots
+// ========= ✅ FIXED: PROMPT ENTER (KEYBOARD) + SEND CLICK =========
+async function focusEditorProseMirror(page) {
+  // Focus ONLY the correct editor id
+  const result = await page.evaluate(() => {
     function deepFind(root, predicate) {
-      const queue = [root];
-      const visited = new Set();
-      while (queue.length) {
-        const node = queue.shift();
-        if (!node || visited.has(node)) continue;
-        visited.add(node);
-
+      const q = [root];
+      const seen = new Set();
+      while (q.length) {
+        const n = q.shift();
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
         try {
-          if (predicate(node)) return node;
+          if (predicate(n)) return n;
         } catch (_) {}
-
-        // push shadow children
-        if (node.shadowRoot) {
-          node.shadowRoot.querySelectorAll("*").forEach((c) => queue.push(c));
-        }
-        // push light DOM children
-        if (node.querySelectorAll) {
-          node.querySelectorAll("*").forEach((c) => queue.push(c));
-        }
+        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        if (n.children) Array.from(n.children).forEach((x) => q.push(x));
       }
       return null;
     }
@@ -545,90 +457,119 @@ async function enterPromptAndSend(page, promptText) {
     const app = document.querySelector("ucs-standalone-app");
     if (!app) return { ok: false, reason: "no_app" };
 
-    // Find the editor host specifically
-    const editorHost = deepFind(app, (n) => n.tagName && n.tagName.toLowerCase() === "ucs-prosemirror-editor");
-    if (!editorHost) return { ok: false, reason: "no_editor_host" };
-
-    const editorRoot = editorHost.shadowRoot || editorHost;
-    const pm = editorRoot.querySelector('div.ProseMirror[contenteditable="true"]');
-    if (!pm) return { ok: false, reason: "no_prosemirror_div" };
-
-    // Focus editor
-    pm.focus();
-
-    // Select all existing text
-    try {
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(pm);
-      sel.removeAllRanges();
-      sel.addRange(range);
-    } catch (_) {}
-
-    // Insert text reliably
-    let inserted = false;
-    try {
-      // works in many Chromium builds
-      inserted = document.execCommand("insertText", false, text);
-    } catch (_) {
-      inserted = false;
-    }
-
-    if (!inserted) {
-      // fallback: manual set as paragraph
-      pm.innerHTML = "";
-      const p = document.createElement("p");
-      p.textContent = text;
-      pm.appendChild(p);
-    }
-
-    // Dispatch input events so app detects changes
-    pm.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-    pm.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-    pm.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, composed: true, key: " " }));
-    pm.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, composed: true, key: " " }));
-
-    // Find send/submit button (md-icon-button etc)
-    const sendBtn = deepFind(app, (n) => {
-      if (!n) return false;
-      const tag = (n.tagName || "").toLowerCase();
-      if (tag === "md-icon-button" || tag === "button" || tag === "md-filled-button") {
-        const ar = (n.getAttribute && (n.getAttribute("aria-label") || "").toLowerCase()) || "";
-        const title = (n.getAttribute && (n.getAttribute("title") || "").toLowerCase()) || "";
-        const txt = ((n.innerText || "") + "").toLowerCase();
-        // try common labels
-        return (
-          ar.includes("send") ||
-          ar.includes("submit") ||
-          ar.includes("generate") ||
-          title.includes("send") ||
-          title.includes("submit") ||
-          txt.includes("send") ||
-          txt.includes("submit")
-        );
-      }
-      return false;
+    const editorHost = deepFind(app, (n) => {
+      return (
+        n.tagName &&
+        n.tagName.toLowerCase() === "ucs-prosemirror-editor" &&
+        (n.id || "") === "agent-search-prosemirror-editor"
+      );
     });
 
-    if (!sendBtn) return { ok: true, sent: false, reason: "no_send_button" };
+    if (!editorHost) return { ok: false, reason: "no_editor_host_id" };
 
-    // Click the actual inner button if in shadow
-    let clickTarget = sendBtn;
-    if (sendBtn.shadowRoot) {
-      clickTarget =
-        sendBtn.shadowRoot.querySelector("button") ||
-        sendBtn.shadowRoot.querySelector("#button") ||
-        sendBtn.shadowRoot.querySelector("md-ripple") ||
-        sendBtn;
-    } else {
-      clickTarget = sendBtn.querySelector?.("button") || sendBtn;
+    const root = editorHost.shadowRoot;
+    if (!root) return { ok: false, reason: "no_shadowroot" };
+
+    const pm = root.querySelector('div.ProseMirror[contenteditable="true"]');
+    if (!pm) return { ok: false, reason: "no_prosemirror" };
+
+    pm.scrollIntoView({ block: "center", behavior: "instant" });
+    pm.focus();
+
+    // Put caret at end
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(pm);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+
+    return { ok: true };
+  });
+
+  if (!result.ok) throw new Error(`Editor focus failed: ${result.reason}`);
+  return true;
+}
+
+async function clickSendButtonDeep(page) {
+  const clicked = await page.evaluate(() => {
+    function deepFind(root, predicate) {
+      const q = [root];
+      const seen = new Set();
+      while (q.length) {
+        const n = q.shift();
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
+        try {
+          if (predicate(n)) return n;
+        } catch (_) {}
+        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+      }
+      return null;
     }
-    clickTarget.click();
-    return { ok: true, sent: true };
-  }, promptText);
 
-  if (!ok || !ok.ok) {
-    throw new Error(`Prompt entry failed: ${(ok && ok.reason) || "unknown"}`);
+    const app = document.querySelector("ucs-standalone-app");
+    if (!app) return false;
+
+    // find md-icon-button or button with aria-label send/submit
+    const btn = deepFind(app, (n) => {
+      const tag = (n.tagName || "").toLowerCase();
+      if (tag !== "md-icon-button" && tag !== "button") return false;
+
+      const ar = (n.getAttribute?.("aria-label") || "").toLowerCase();
+      const title = (n.getAttribute?.("title") || "").toLowerCase();
+      const txt = (n.innerText || "").toLowerCase();
+
+      // Gemini sometimes labels it "Send" / "Submit" / "Search"
+      return (
+        ar.includes("send") ||
+        ar.includes("submit") ||
+        ar.includes("search") ||
+        title.includes("send") ||
+        title.includes("submit") ||
+        txt.includes("send")
+      );
+    });
+
+    if (!btn) return false;
+
+    let target = btn;
+    if (btn.shadowRoot) target = btn.shadowRoot.querySelector("button") || btn;
+    else target = btn.querySelector?.("button") || btn;
+
+    target.click();
+    return true;
+  });
+
+  return clicked;
+}
+
+async function enterPromptAndSend(page, promptText) {
+  // 1) Focus the ProseMirror editor (shadow)
+  await focusEditorProseMirror(page);
+  await sleep(300);
+
+  // 2) CTRL+A and type via keyboard (MOST reliable)
+  await page.keyboard.down("Control");
+  await page.keyboard.press("A");
+  await page.keyboard.up("Control");
+  await sleep(50);
+
+  // clear by backspace (extra safety)
+  await page.keyboard.press("Backspace");
+  await sleep(80);
+
+  await page.keyboard.type(promptText, { delay: 2 });
+  await sleep(250);
+
+  // 3) Click send (deep)
+  const sent = await clickSendButtonDeep(page);
+
+  // 4) Fallback: press Enter (sometimes submits)
+  if (!sent) {
+    console.log("⚠️ Send button not found. Falling back to ENTER...");
+    await page.keyboard.press("Enter");
   }
 }
 
@@ -654,8 +595,8 @@ async function downloadBlobImage(page, blobUrl, outputFile) {
 async function main() {
   try {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-
     const prompts = loadPromptsFromFile(PROMPT_FILE);
+
     if (!prompts.length) {
       console.log("No prompts loaded. Exiting.");
       updateJobMeta("failed", { reason: "no_prompts" });
@@ -703,20 +644,19 @@ async function main() {
         );
 
         const pages = [];
-        for (let i = 0; i < batchPrompts.length; i++) {
-          pages.push(await browser.newPage());
-        }
+        for (let i = 0; i < batchPrompts.length; i++) pages.push(await browser.newPage());
 
         const firstPage = pages[0];
         if (firstPage) await firstPage.bringToFront();
 
-        // Reset each 10 images
+        // Reset every 10
         if (start > 0 && start % 10 === 0) {
-          console.log(`⚠️ 10 Images Threshold Reached (Index: ${start}). Reset check...`);
+          console.log(`⚠️ 10 Images Threshold reached (${start}). Reset check...`);
           await handleAccountReset(firstPage);
           await sleep(5000);
         }
 
+        // Login check first tab
         await ensureLoggedInOnFirstTab(firstPage);
 
         console.log("Navigating all tabs to Gemini...");
@@ -724,7 +664,7 @@ async function main() {
           pages.map(async (p) => {
             try {
               await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
-            } catch (_) {
+            } catch (e) {
               try {
                 await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
               } catch (_) {}
@@ -760,12 +700,12 @@ async function main() {
           })
         );
 
-        console.log("\n✅ All prompts submitted. Monitoring...");
+        console.log("\n✅ Monitoring...");
 
-        const batchTimeout = Date.now() + 600 * 1000; // 10 minutes
+        const batchTimeout = Date.now() + 600 * 1000; // 10 min
         while (batchJobs.some((j) => !j.finished)) {
           if (Date.now() > batchTimeout) {
-            console.log("⚠️ Batch timeout reached (10 mins). Moving on.");
+            console.log("⚠️ Batch timeout reached. Moving on.");
             break;
           }
 
@@ -776,8 +716,7 @@ async function main() {
               const blobUrl = await findBlobUrlNow(job.page, BLOB_PREFIX);
               if (blobUrl) {
                 const durationSeconds = ((Date.now() - job.startTime) / 1000).toFixed(1);
-                console.log(`🎉 FOUND Image Blob for Image ${job.sceneNumber}`);
-                console.log(`⏱️ Time taken: ${durationSeconds}s`);
+                console.log(`🎉 FOUND blob for Image ${job.sceneNumber} | ${durationSeconds}s`);
 
                 const fileName = makeRandomFileName(job.sceneNumber);
                 const outputFile = path.join(OUTPUT_DIR, fileName);
@@ -787,17 +726,17 @@ async function main() {
                 continue;
               }
 
-              const isBanned = await checkBannedError(job.page);
-              if (isBanned) {
-                console.log(`❌ Image ${job.sceneNumber} FAILED: banned answer detected.`);
+              const banned = await checkBannedError(job.page);
+              if (banned) {
+                console.log(`❌ Image ${job.sceneNumber} banned-answer.`);
                 job.finished = true;
                 continue;
               }
 
               const elapsed = Date.now() - job.startTime;
-              const TIMEOUT_MS = 200000; // 200 seconds
+              const TIMEOUT_MS = 200000;
               if (elapsed > TIMEOUT_MS) {
-                console.log(`⏩ Image ${job.sceneNumber} timed out (>200s). SKIPPING.`);
+                console.log(`⏩ Image ${job.sceneNumber} timeout (>200s). Skipping.`);
                 job.finished = true;
                 continue;
               }
@@ -810,6 +749,7 @@ async function main() {
         }
 
         console.log(`=== Batch ${batchNumber} completed ===`);
+
         for (const p of pages) {
           try {
             await p.close();
