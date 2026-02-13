@@ -1,16 +1,7 @@
 // generate_image.js
-//
-// ✅ AT A TIME: All tabs me prompt "PASTE" hoga (type/write nahi hoga) + Submit click hoga
-// ✅ Shadow DOM safe: ProseMirror + Submit button deep shadow traversal se find hota hai
-// ✅ Works with Promise.all (multi tabs simultaneously) because keyboard use nahi ho raha
-// ✅ Keep your reset/login logic (included below)
-//
-// Run:
-// node generate_image.js --promptFile=prompts.txt --maxTabs=5 --headless=false
-//
-// Env (recommended):
-// set GEMINI_EMAIL=...
-// set GEMINI_PASSWORD=...
+// ✅ Multi-tabs: prompt PASTE at once (NO typing)
+// ✅ Submit click ROBUST (works even when inner button is inside closed shadow)
+// ✅ Uses multiple fallback strategies + coordinate click
 
 const fs = require("fs");
 const path = require("path");
@@ -128,10 +119,8 @@ async function dismissWelcomeIfPresent(page) {
     const laterClicked = await page.evaluate(() => {
       const app = document.querySelector("ucs-standalone-app");
       if (!app?.shadowRoot) return false;
-
       const welcome = app.shadowRoot.querySelector("ucs-welcome-dialog");
       if (!welcome?.shadowRoot) return false;
-
       const dlg = welcome.shadowRoot.querySelector("md-dialog");
       if (!dlg) return false;
 
@@ -152,18 +141,13 @@ async function dismissWelcomeIfPresent(page) {
       }
       return false;
     });
-
-    if (laterClicked) {
-      console.log("Clicked 'I'll do this later'.");
-      await sleep(2500);
-    }
+    if (laterClicked) await sleep(2500);
   } catch (_) {}
 }
 
 async function clickAgreeButton(page) {
   try {
     if (await isElementPresent(page, ".agree-button", 4000)) {
-      console.log("⚠️ Agree found. Clicking...");
       await page.click(".agree-button");
       await sleep(4000);
       await dismissWelcomeIfPresent(page);
@@ -181,65 +165,52 @@ async function clickAgreeButton(page) {
     });
 
     if (clickedByText) {
-      console.log("⚠️ Agree found via text. Clicked.");
       await sleep(4000);
       await dismissWelcomeIfPresent(page);
       return true;
     }
-  } catch (e) {
-    console.log("Agree check failed:", e.message);
-  }
+  } catch (_) {}
   return false;
 }
 
-// ========= ACCOUNT RESET LOGIC =========
+// ========= ACCOUNT RESET =========
 async function handleAccountReset(page) {
   console.log("♻️ Reset Check...");
   try {
     await page.goto(GEMINI_URL, { waitUntil: "networkidle2" });
   } catch (_) {}
-
   await sleep(4000);
 
-  const isAgreePresentInitial = await page.evaluate(() => {
-    const btn = document.querySelector(".agree-button");
-    if (btn) return true;
+  const agree = await page.evaluate(() => {
+    if (document.querySelector(".agree-button")) return true;
     return Array.from(document.querySelectorAll("button")).some((b) =>
       (b.innerText || "").includes("Agree & get started")
     );
   });
 
-  if (isAgreePresentInitial) {
-    console.log("✅ Agree found initially.");
+  if (agree) {
     await clickAgreeButton(page);
     return;
   }
 
-  console.log("⚠️ Agree not found. Deleting account...");
   await page.goto(SETTINGS_URL, { waitUntil: "networkidle2" });
   await sleep(5000);
 
   const deleteBtnXpath =
     "/html/body/saas-settingsfe-root/main/saas-settingsfe-admin-page/mat-sidenav-container/mat-sidenav-content/saas-settingsfe-general-section/div/div[2]/div/div/button";
-
-  const clickedDelete = await clickByXpath(page, deleteBtnXpath);
-  if (!clickedDelete) return;
+  if (!(await clickByXpath(page, deleteBtnXpath))) return;
 
   await sleep(2000);
 
   const inputXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-content/form/mat-form-field/div[1]/div/div[2]/input";
-
-  const typed = await typeByXpath(page, inputXpath, "DELETE");
-  if (!typed) return;
+  if (!(await typeByXpath(page, inputXpath, "DELETE"))) return;
 
   await sleep(1500);
 
   const confirmBtnXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-actions/button[2]";
-
-  const confirmed = await clickByXpath(page, confirmBtnXpath);
-  if (confirmed) {
+  if (await clickByXpath(page, confirmBtnXpath)) {
     await sleep(6000);
     await clickAgreeButton(page);
   }
@@ -258,18 +229,14 @@ async function ensureLoggedInOnFirstTab(page) {
   }
 
   await sleep(2500);
-
-  // Agree before anything
   if (await clickAgreeButton(page)) return;
 
   const dashboard = await page.evaluate(() => !!document.querySelector("ucs-standalone-app"));
   if (dashboard) {
-    console.log("✅ Dashboard visible.");
     await dismissWelcomeIfPresent(page);
     return;
   }
 
-  // Email login
   try {
     const emailInput = await page.waitForSelector("#email-input", { timeout: 12000 });
     await emailInput.click();
@@ -280,7 +247,6 @@ async function ensureLoggedInOnFirstTab(page) {
     await continueBtn.click();
     await sleep(8000);
 
-    // Password
     try {
       const passInput = await page.waitForSelector('input[name="Passwd"]', { timeout: 20000 });
       await passInput.click();
@@ -290,7 +256,6 @@ async function ensureLoggedInOnFirstTab(page) {
     } catch (_) {}
   } catch (_) {}
 
-  // Confirmations
   for (let i = 1; i <= 2; i++) {
     try {
       const confirmSelector = 'input[value="I understand"], #confirm';
@@ -309,7 +274,7 @@ async function ensureLoggedInOnFirstTab(page) {
 }
 
 // ========= DEEP SHADOW: WAIT EDITOR =========
-async function waitForProseMirrorDeep(page, timeoutMs = 25000) {
+async function waitForProseMirrorDeep(page, timeoutMs = 30000) {
   await page.waitForFunction(
     () => {
       function deepHas(root) {
@@ -365,25 +330,22 @@ async function pastePromptDeep(page, promptText) {
       sel.addRange(range);
     } catch (_) {}
 
-    // Try clipboard paste event
+    // Try paste event
     let pasteWorked = false;
     try {
       const dt = new DataTransfer();
       dt.setData("text/plain", text);
-
       const evt = new ClipboardEvent("paste", {
         bubbles: true,
         cancelable: true,
         clipboardData: dt,
       });
-
-      // if dispatchEvent returns true => not prevented
       const dispatched = pm.dispatchEvent(evt);
       pasteWorked = dispatched === true;
     } catch (_) {}
 
-    // Fallback: direct set
     if (!pasteWorked) {
+      // fallback direct set
       pm.innerHTML = "";
       const p = document.createElement("p");
       p.innerText = text;
@@ -410,9 +372,10 @@ async function pastePromptDeep(page, promptText) {
   if (!res?.ok) throw new Error(`paste failed: ${res?.reason || "unknown"}`);
 }
 
-// ========= ✅ CLICK SUBMIT (deep) =========
-async function clickSubmitDeep(page) {
-  return page.evaluate(() => {
+// ========= ✅ ROBUST SUBMIT CLICK =========
+async function clickSubmitRobust(page) {
+  // 1) Try to click in-page via deep traversal (open shadows only)
+  const r1 = await page.evaluate(() => {
     function deepFind(root, predicate) {
       const q = [root];
       const seen = new Set();
@@ -429,18 +392,83 @@ async function clickSubmitDeep(page) {
       return null;
     }
 
-    // Your exact inner button is: <button id="button" aria-label="Submit">
-    // We'll search by aria-label because shadow roots vary.
-    const btn = deepFind(document, (n) => n?.matches?.('button[aria-label="Submit"]'));
-    if (!btn) return false;
-    btn.click();
-    return true;
+    // A) exact aria-label submit
+    const btnSubmit = deepFind(document, (n) => n?.matches?.('button[aria-label="Submit"]'));
+    if (btnSubmit) {
+      btnSubmit.click();
+      return { ok: true, method: "deep_button_submit" };
+    }
+
+    // B) common variants
+    const btnSend = deepFind(document, (n) => n?.matches?.('button[aria-label="Send"]'));
+    if (btnSend) {
+      btnSend.click();
+      return { ok: true, method: "deep_button_send" };
+    }
+
+    const btnGen = deepFind(document, (n) => n?.matches?.('button[aria-label*="Generate"]'));
+    if (btnGen) {
+      btnGen.click();
+      return { ok: true, method: "deep_button_generate" };
+    }
+
+    // C) click host md-icon-button (works when inner button is in closed shadow)
+    const iconBtn = deepFind(document, (n) => (n?.tagName || "").toLowerCase() === "md-icon-button");
+    if (iconBtn) {
+      iconBtn.click();
+      return { ok: true, method: "click_md_icon_button_host" };
+    }
+
+    // D) role=button + label contains submit/send
+    const roleBtn = deepFind(document, (n) => {
+      if (!n?.getAttribute) return false;
+      const role = (n.getAttribute("role") || "").toLowerCase();
+      if (role !== "button") return false;
+      const ar = (n.getAttribute("aria-label") || "").toLowerCase();
+      const txt = (n.innerText || "").toLowerCase();
+      return ar.includes("submit") || ar.includes("send") || txt.includes("submit") || txt.includes("send");
+    });
+    if (roleBtn) {
+      roleBtn.click();
+      return { ok: true, method: "role_button_click" };
+    }
+
+    // Nothing found in open shadows
+    return { ok: false, method: "no_dom_click_target" };
   });
+
+  if (r1?.ok) return { ok: true, method: r1.method };
+
+  // 2) Node-side fallback: click last md-icon-button (host) using Puppeteer handles
+  try {
+    const icons = await page.$$("md-icon-button");
+    if (icons && icons.length) {
+      await icons[icons.length - 1].click({ delay: 10 });
+      return { ok: true, method: "puppeteer_click_md_icon_button_last" };
+    }
+  } catch (_) {}
+
+  // 3) Coordinates click fallback on last md-icon-button (host rect)
+  try {
+    const coords = await page.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll("md-icon-button"));
+      if (!nodes.length) return null;
+      const el = nodes[nodes.length - 1];
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    if (coords) {
+      await page.mouse.click(coords.x, coords.y);
+      return { ok: true, method: "mouse_click_md_icon_button_center" };
+    }
+  } catch (_) {}
+
+  return { ok: false, method: "all_submit_methods_failed" };
 }
 
-// ========= OPTIONAL: TOOL SWITCH (tolerant) =========
-// If tool menu UI changes, ignore (dont fail).
+// ========= OPTIONAL TOOL SWITCH (tolerant) =========
 async function openToolsAndClickGenerate(page) {
+  // If this fails, ignore. Prompt+Submit will still try.
   try {
     await page.evaluate(() => {
       function deepFind(root, predicate) {
@@ -462,7 +490,6 @@ async function openToolsAndClickGenerate(page) {
       const app = document.querySelector("ucs-standalone-app");
       if (!app) return false;
 
-      // Find a tools button by aria-label/title/text
       const toolsBtn = deepFind(app, (n) => {
         if (!n?.getAttribute) return false;
         const ar = (n.getAttribute("aria-label") || "").toLowerCase();
@@ -476,7 +503,7 @@ async function openToolsAndClickGenerate(page) {
       return true;
     });
 
-    await sleep(1200);
+    await sleep(1000);
 
     await page.evaluate(() => {
       const visited = new Set();
@@ -501,7 +528,7 @@ async function openToolsAndClickGenerate(page) {
       return false;
     });
 
-    await sleep(1000);
+    await sleep(900);
   } catch (_) {}
 }
 
@@ -543,7 +570,7 @@ async function checkBannedError(page) {
   });
 }
 
-// ========= DOWNLOAD BLOB IMAGE =========
+// ========= DOWNLOAD =========
 async function downloadBlobImage(page, blobUrl, outputFile) {
   console.log(`Downloading blob image for ${outputFile} ...`);
   const imageBase64 = await page.evaluate(async (url) => {
@@ -619,17 +646,14 @@ async function main() {
         const firstPage = pages[0];
         if (firstPage) await firstPage.bringToFront();
 
-        // Reset every 10 images
         if (start > 0 && start % 10 === 0) {
           console.log(`⚠️ 10 images threshold (${start}). Reset check...`);
           await handleAccountReset(firstPage);
           await sleep(5000);
         }
 
-        // Login check only on first tab
         await ensureLoggedInOnFirstTab(firstPage);
 
-        // Navigate all tabs
         console.log("Navigating all tabs to Gemini...");
         await Promise.all(
           pages.map(async (p) => {
@@ -652,33 +676,29 @@ async function main() {
           finished: false,
           startTime: null,
         }));
-
         globalIndex += batchPrompts.length;
 
-        console.log("🚀 Submitting prompts to all tabs (PASTE + SUBMIT AT ONCE)...");
+        console.log("🚀 PASTE + SUBMIT on all tabs at once...");
 
-        // ✅ AT A TIME ON ALL TABS
+        // ✅ All tabs: paste + robust submit
         await Promise.all(
           batchJobs.map(async (job) => {
-            console.log(` [Image ${job.sceneNumber}] Submitting...`);
+            console.log(` [Image ${job.sceneNumber}] Pasting...`);
             try {
-              // optional: try to switch tool mode (ignore if fails)
-              await openToolsAndClickGenerate(job.page);
-
-              // wait editor exists
+              await openToolsAndClickGenerate(job.page); // tolerant
               await waitForProseMirrorDeep(job.page, 30000);
-
-              // paste prompt (no typing)
               await pastePromptDeep(job.page, job.prompt);
 
-              // click submit
-              const clicked = await clickSubmitDeep(job.page);
-              if (!clicked) console.log(`⚠️ [Image ${job.sceneNumber}] Submit button not found.`);
+              const submitRes = await clickSubmitRobust(job.page);
+              if (!submitRes.ok) {
+                console.log(` ⚠️ [Image ${job.sceneNumber}] Submit failed: ${submitRes.method}`);
+              } else {
+                console.log(` ✅ [Image ${job.sceneNumber}] Submitted (${submitRes.method})`);
+              }
 
               job.startTime = Date.now();
-              console.log(` ✅ [Image ${job.sceneNumber}] Pasted + Submitted`);
             } catch (e) {
-              console.error(` ❌ [Image ${job.sceneNumber}] Submit Failed:`, e.message);
+              console.error(` ❌ [Image ${job.sceneNumber}] Failed:`, e.message);
               job.startTime = Date.now();
             }
           })
@@ -686,7 +706,7 @@ async function main() {
 
         console.log("\n✅ Monitoring...");
 
-        const batchTimeout = Date.now() + 600 * 1000; // 10 mins
+        const batchTimeout = Date.now() + 600 * 1000;
         while (batchJobs.some((j) => !j.finished)) {
           if (Date.now() > batchTimeout) {
             console.log("⚠️ Batch timeout reached. Moving on.");
@@ -729,7 +749,6 @@ async function main() {
         }
 
         console.log(`=== Batch ${batchNumber} completed ===`);
-
         for (const p of pages) {
           try {
             await p.close();
