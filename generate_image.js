@@ -1,8 +1,16 @@
 // generate_image.js
-// ✅ FIXED: Multi-tab typing issue (no Promise.all for keyboard)
-// ✅ FIXED: Deep shadow traversal for ProseMirror editor
-// ✅ FIXED: Click Submit button (aria-label="Submit") inside any shadow roots
-// ✅ Works even if ucs-chat-landing / ucs-search-bar structure changes
+//
+// ✅ AT A TIME: All tabs me prompt "PASTE" hoga (type/write nahi hoga) + Submit click hoga
+// ✅ Shadow DOM safe: ProseMirror + Submit button deep shadow traversal se find hota hai
+// ✅ Works with Promise.all (multi tabs simultaneously) because keyboard use nahi ho raha
+// ✅ Keep your reset/login logic (included below)
+//
+// Run:
+// node generate_image.js --promptFile=prompts.txt --maxTabs=5 --headless=false
+//
+// Env (recommended):
+// set GEMINI_EMAIL=...
+// set GEMINI_PASSWORD=...
 
 const fs = require("fs");
 const path = require("path");
@@ -155,6 +163,7 @@ async function dismissWelcomeIfPresent(page) {
 async function clickAgreeButton(page) {
   try {
     if (await isElementPresent(page, ".agree-button", 4000)) {
+      console.log("⚠️ Agree found. Clicking...");
       await page.click(".agree-button");
       await sleep(4000);
       await dismissWelcomeIfPresent(page);
@@ -172,15 +181,18 @@ async function clickAgreeButton(page) {
     });
 
     if (clickedByText) {
+      console.log("⚠️ Agree found via text. Clicked.");
       await sleep(4000);
       await dismissWelcomeIfPresent(page);
       return true;
     }
-  } catch (_) {}
+  } catch (e) {
+    console.log("Agree check failed:", e.message);
+  }
   return false;
 }
 
-// ========= ACCOUNT RESET (optional) =========
+// ========= ACCOUNT RESET LOGIC =========
 async function handleAccountReset(page) {
   console.log("♻️ Reset Check...");
   try {
@@ -189,14 +201,16 @@ async function handleAccountReset(page) {
 
   await sleep(4000);
 
-  const agree = await page.evaluate(() => {
-    if (document.querySelector(".agree-button")) return true;
+  const isAgreePresentInitial = await page.evaluate(() => {
+    const btn = document.querySelector(".agree-button");
+    if (btn) return true;
     return Array.from(document.querySelectorAll("button")).some((b) =>
       (b.innerText || "").includes("Agree & get started")
     );
   });
 
-  if (agree) {
+  if (isAgreePresentInitial) {
+    console.log("✅ Agree found initially.");
     await clickAgreeButton(page);
     return;
   }
@@ -208,21 +222,24 @@ async function handleAccountReset(page) {
   const deleteBtnXpath =
     "/html/body/saas-settingsfe-root/main/saas-settingsfe-admin-page/mat-sidenav-container/mat-sidenav-content/saas-settingsfe-general-section/div/div[2]/div/div/button";
 
-  if (!(await clickByXpath(page, deleteBtnXpath))) return;
+  const clickedDelete = await clickByXpath(page, deleteBtnXpath);
+  if (!clickedDelete) return;
 
   await sleep(2000);
 
   const inputXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-content/form/mat-form-field/div[1]/div/div[2]/input";
 
-  if (!(await typeByXpath(page, inputXpath, "DELETE"))) return;
+  const typed = await typeByXpath(page, inputXpath, "DELETE");
+  if (!typed) return;
 
   await sleep(1500);
 
   const confirmBtnXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-actions/button[2]";
 
-  if (await clickByXpath(page, confirmBtnXpath)) {
+  const confirmed = await clickByXpath(page, confirmBtnXpath);
+  if (confirmed) {
     await sleep(6000);
     await clickAgreeButton(page);
   }
@@ -241,6 +258,8 @@ async function ensureLoggedInOnFirstTab(page) {
   }
 
   await sleep(2500);
+
+  // Agree before anything
   if (await clickAgreeButton(page)) return;
 
   const dashboard = await page.evaluate(() => !!document.querySelector("ucs-standalone-app"));
@@ -250,6 +269,7 @@ async function ensureLoggedInOnFirstTab(page) {
     return;
   }
 
+  // Email login
   try {
     const emailInput = await page.waitForSelector("#email-input", { timeout: 12000 });
     await emailInput.click();
@@ -260,6 +280,7 @@ async function ensureLoggedInOnFirstTab(page) {
     await continueBtn.click();
     await sleep(8000);
 
+    // Password
     try {
       const passInput = await page.waitForSelector('input[name="Passwd"]', { timeout: 20000 });
       await passInput.click();
@@ -269,6 +290,7 @@ async function ensureLoggedInOnFirstTab(page) {
     } catch (_) {}
   } catch (_) {}
 
+  // Confirmations
   for (let i = 1; i <= 2; i++) {
     try {
       const confirmSelector = 'input[value="I understand"], #confirm';
@@ -286,37 +308,32 @@ async function ensureLoggedInOnFirstTab(page) {
   console.log("✅ Ready.");
 }
 
-// ========= DEEP SHADOW HELPERS (IMPORTANT) =========
+// ========= DEEP SHADOW: WAIT EDITOR =========
 async function waitForProseMirrorDeep(page, timeoutMs = 25000) {
   await page.waitForFunction(
     () => {
-      function deepHasProseMirror(root) {
+      function deepHas(root) {
         const q = [root];
         const seen = new Set();
         while (q.length) {
           const n = q.shift();
           if (!n || seen.has(n)) continue;
           seen.add(n);
-
-          if (n.nodeType === 1 && n.matches) {
-            if (n.matches('div.ProseMirror[contenteditable="true"]')) return true;
-          }
-
-          if (n.shadowRoot) {
-            n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
-          }
+          if (n.nodeType === 1 && n.matches && n.matches('div.ProseMirror[contenteditable="true"]')) return true;
+          if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
           if (n.children) Array.from(n.children).forEach((x) => q.push(x));
         }
         return false;
       }
-      return deepHasProseMirror(document);
+      return deepHas(document);
     },
     { timeout: timeoutMs }
   );
 }
 
-async function focusProseMirrorDeep(page) {
-  const result = await page.evaluate(() => {
+// ========= ✅ PASTE PROMPT (NO TYPE) =========
+async function pastePromptDeep(page, promptText) {
+  const res = await page.evaluate((text) => {
     function deepFind(root, predicate) {
       const q = [root];
       const seen = new Set();
@@ -324,11 +341,9 @@ async function focusProseMirrorDeep(page) {
         const n = q.shift();
         if (!n || seen.has(n)) continue;
         seen.add(n);
-
         try {
           if (predicate(n)) return n;
         } catch (_) {}
-
         if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
         if (n.children) Array.from(n.children).forEach((x) => q.push(x));
       }
@@ -336,26 +351,66 @@ async function focusProseMirrorDeep(page) {
     }
 
     const pm = deepFind(document, (n) => n?.matches?.('div.ProseMirror[contenteditable="true"]'));
-    if (!pm) return { ok: false, reason: "no_prosemirror_found" };
+    if (!pm) return { ok: false, reason: "no_prosemirror" };
 
     pm.scrollIntoView({ block: "center", behavior: "instant" });
     pm.focus();
 
+    // select all
     try {
       const sel = window.getSelection();
       const range = document.createRange();
       range.selectNodeContents(pm);
-      range.collapse(false);
       sel.removeAllRanges();
       sel.addRange(range);
     } catch (_) {}
 
-    return { ok: true };
-  });
+    // Try clipboard paste event
+    let pasteWorked = false;
+    try {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", text);
 
-  if (!result.ok) throw new Error(`Focus editor failed: ${result.reason}`);
+      const evt = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt,
+      });
+
+      // if dispatchEvent returns true => not prevented
+      const dispatched = pm.dispatchEvent(evt);
+      pasteWorked = dispatched === true;
+    } catch (_) {}
+
+    // Fallback: direct set
+    if (!pasteWorked) {
+      pm.innerHTML = "";
+      const p = document.createElement("p");
+      p.innerText = text;
+      pm.appendChild(p);
+
+      try {
+        pm.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      } catch (_) {
+        const e = document.createEvent("HTMLEvents");
+        e.initEvent("input", true, true);
+        pm.dispatchEvent(e);
+      }
+      pm.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    // Ensure input
+    try {
+      pm.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    } catch (_) {}
+
+    return { ok: true };
+  }, promptText);
+
+  if (!res?.ok) throw new Error(`paste failed: ${res?.reason || "unknown"}`);
 }
 
+// ========= ✅ CLICK SUBMIT (deep) =========
 async function clickSubmitDeep(page) {
   return page.evaluate(() => {
     function deepFind(root, predicate) {
@@ -365,29 +420,27 @@ async function clickSubmitDeep(page) {
         const n = q.shift();
         if (!n || seen.has(n)) continue;
         seen.add(n);
-
         try {
           if (predicate(n)) return n;
         } catch (_) {}
-
         if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
         if (n.children) Array.from(n.children).forEach((x) => q.push(x));
       }
       return null;
     }
 
-    // EXACT button anywhere (even inside shadow roots)
+    // Your exact inner button is: <button id="button" aria-label="Submit">
+    // We'll search by aria-label because shadow roots vary.
     const btn = deepFind(document, (n) => n?.matches?.('button[aria-label="Submit"]'));
     if (!btn) return false;
-
     btn.click();
     return true;
   });
 }
 
-// ========= TOOL MENU (optional - tolerant) =========
+// ========= OPTIONAL: TOOL SWITCH (tolerant) =========
+// If tool menu UI changes, ignore (dont fail).
 async function openToolsAndClickGenerate(page) {
-  // Keep tolerant: if it fails, ignore — prompt/submit still works if already in image mode
   try {
     await page.evaluate(() => {
       function deepFind(root, predicate) {
@@ -397,11 +450,9 @@ async function openToolsAndClickGenerate(page) {
           const n = q.shift();
           if (!n || seen.has(n)) continue;
           seen.add(n);
-
           try {
             if (predicate(n)) return n;
           } catch (_) {}
-
           if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
           if (n.children) Array.from(n.children).forEach((x) => q.push(x));
         }
@@ -411,6 +462,7 @@ async function openToolsAndClickGenerate(page) {
       const app = document.querySelector("ucs-standalone-app");
       if (!app) return false;
 
+      // Find a tools button by aria-label/title/text
       const toolsBtn = deepFind(app, (n) => {
         if (!n?.getAttribute) return false;
         const ar = (n.getAttribute("aria-label") || "").toLowerCase();
@@ -419,12 +471,9 @@ async function openToolsAndClickGenerate(page) {
         return ar.includes("tools") || t.includes("tools") || txt.includes("tools");
       });
 
-      if (toolsBtn) {
-        const clickTarget = toolsBtn.shadowRoot?.querySelector("button") || toolsBtn;
-        clickTarget.click();
-        return true;
-      }
-      return false;
+      if (!toolsBtn) return false;
+      (toolsBtn.shadowRoot?.querySelector("button") || toolsBtn).click();
+      return true;
     });
 
     await sleep(1200);
@@ -452,37 +501,8 @@ async function openToolsAndClickGenerate(page) {
       return false;
     });
 
-    await sleep(1200);
+    await sleep(1000);
   } catch (_) {}
-}
-
-// ========= ✅ MAIN ACTION: PROMPT + SUBMIT (SAFE) =========
-async function enterPromptAndSubmit(page, promptText) {
-  // Must be front tab for keyboard
-  await page.bringToFront();
-  await sleep(150);
-
-  // Wait editor (deep)
-  await waitForProseMirrorDeep(page, 30000);
-  await focusProseMirrorDeep(page);
-  await sleep(120);
-
-  // Clear + type
-  await page.keyboard.down("Control");
-  await page.keyboard.press("A");
-  await page.keyboard.up("Control");
-  await page.keyboard.press("Backspace");
-  await sleep(50);
-
-  await page.keyboard.type(promptText, { delay: 2 });
-  await sleep(200);
-
-  // Click Submit
-  const clicked = await clickSubmitDeep(page);
-  if (!clicked) {
-    console.log("⚠️ Submit not found, fallback ENTER...");
-    await page.keyboard.press("Enter");
-  }
 }
 
 // ========= CHECKS =========
@@ -523,7 +543,7 @@ async function checkBannedError(page) {
   });
 }
 
-// ========= DOWNLOAD =========
+// ========= DOWNLOAD BLOB IMAGE =========
 async function downloadBlobImage(page, blobUrl, outputFile) {
   console.log(`Downloading blob image for ${outputFile} ...`);
   const imageBase64 = await page.evaluate(async (url) => {
@@ -577,6 +597,7 @@ async function main() {
       defaultViewport: { width: 1280, height: 720 },
       userDataDir: USER_DATA_DIR,
     };
+
     if (BROWSER_PATH) launchOptions.executablePath = BROWSER_PATH;
 
     console.log(`📂 Using Profile Directory: ${USER_DATA_DIR}`);
@@ -598,27 +619,31 @@ async function main() {
         const firstPage = pages[0];
         if (firstPage) await firstPage.bringToFront();
 
+        // Reset every 10 images
         if (start > 0 && start % 10 === 0) {
           console.log(`⚠️ 10 images threshold (${start}). Reset check...`);
           await handleAccountReset(firstPage);
           await sleep(5000);
         }
 
+        // Login check only on first tab
         await ensureLoggedInOnFirstTab(firstPage);
 
+        // Navigate all tabs
         console.log("Navigating all tabs to Gemini...");
-        for (const p of pages) {
-          try {
-            await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
-          } catch (_) {
+        await Promise.all(
+          pages.map(async (p) => {
             try {
               await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
-            } catch (_) {}
-          }
-          await sleep(800);
-        }
+            } catch (_) {
+              try {
+                await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
+              } catch (_) {}
+            }
+          })
+        );
 
-        await sleep(2500);
+        await sleep(4000);
 
         const batchJobs = pages.map((page, idx) => ({
           page,
@@ -627,33 +652,41 @@ async function main() {
           finished: false,
           startTime: null,
         }));
+
         globalIndex += batchPrompts.length;
 
-        console.log("🚀 Submitting prompts to all tabs (SEQUENTIAL)...");
+        console.log("🚀 Submitting prompts to all tabs (PASTE + SUBMIT AT ONCE)...");
 
-        // ✅ IMPORTANT: SEQUENTIAL SUBMIT (keyboard safe)
-        for (const job of batchJobs) {
-          console.log(` [Image ${job.sceneNumber}] Submitting...`);
-          try {
-            await job.page.bringToFront();
-            await sleep(150);
+        // ✅ AT A TIME ON ALL TABS
+        await Promise.all(
+          batchJobs.map(async (job) => {
+            console.log(` [Image ${job.sceneNumber}] Submitting...`);
+            try {
+              // optional: try to switch tool mode (ignore if fails)
+              await openToolsAndClickGenerate(job.page);
 
-            // optional: try switch tool mode, ignore if it fails
-            await openToolsAndClickGenerate(job.page);
+              // wait editor exists
+              await waitForProseMirrorDeep(job.page, 30000);
 
-            await enterPromptAndSubmit(job.page, job.prompt);
-            job.startTime = Date.now();
-            console.log(` [Image ${job.sceneNumber}] Submitted ✅`);
-          } catch (e) {
-            console.error(` [Image ${job.sceneNumber}] Submit Failed:`, e.message);
-            job.startTime = Date.now();
-          }
-          await sleep(600); // small gap between tabs
-        }
+              // paste prompt (no typing)
+              await pastePromptDeep(job.page, job.prompt);
+
+              // click submit
+              const clicked = await clickSubmitDeep(job.page);
+              if (!clicked) console.log(`⚠️ [Image ${job.sceneNumber}] Submit button not found.`);
+
+              job.startTime = Date.now();
+              console.log(` ✅ [Image ${job.sceneNumber}] Pasted + Submitted`);
+            } catch (e) {
+              console.error(` ❌ [Image ${job.sceneNumber}] Submit Failed:`, e.message);
+              job.startTime = Date.now();
+            }
+          })
+        );
 
         console.log("\n✅ Monitoring...");
 
-        const batchTimeout = Date.now() + 600 * 1000;
+        const batchTimeout = Date.now() + 600 * 1000; // 10 mins
         while (batchJobs.some((j) => !j.finished)) {
           if (Date.now() > batchTimeout) {
             console.log("⚠️ Batch timeout reached. Moving on.");
@@ -675,7 +708,7 @@ async function main() {
 
               const banned = await checkBannedError(job.page);
               if (banned) {
-                console.log(`❌ Image ${job.sceneNumber}: banned.`);
+                console.log(`❌ Image ${job.sceneNumber}: banned-answer.`);
                 job.finished = true;
                 continue;
               }
@@ -683,7 +716,7 @@ async function main() {
               const elapsed = Date.now() - job.startTime;
               const TIMEOUT_MS = 200000;
               if (elapsed > TIMEOUT_MS) {
-                console.log(`⏩ Image ${job.sceneNumber} timeout. Skipping.`);
+                console.log(`⏩ Image ${job.sceneNumber} timeout (>200s). Skipping.`);
                 job.finished = true;
                 continue;
               }
@@ -696,6 +729,7 @@ async function main() {
         }
 
         console.log(`=== Batch ${batchNumber} completed ===`);
+
         for (const p of pages) {
           try {
             await p.close();
