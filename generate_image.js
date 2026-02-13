@@ -1,6 +1,7 @@
 // generate_image.js
-// FIXED: Prompt enter inside ucs-prosemirror-editor shadowRoot
-// FIXED: Click Submit button inside md-icon-button shadowRoot (button#button aria-label=Submit)
+// ✅ FIX: Works even when UI structure changes (no ucs-chat-landing / no searchbar shadow assumptions)
+// ✅ Finds ProseMirror contenteditable by deep shadow traversal
+// ✅ Clicks Submit button inside md-icon-button shadowRoot by deep shadow traversal
 
 const fs = require("fs");
 const path = require("path");
@@ -28,8 +29,7 @@ if (!PROMPT_FILE) {
   process.exit(1);
 }
 
-const OUTPUT_DIR =
-  argMap.outputDir || process.env.OUTPUT_DIR || path.join(process.cwd(), "output_images");
+const OUTPUT_DIR = argMap.outputDir || process.env.OUTPUT_DIR || path.join(process.cwd(), "output_images");
 const JOB_META_PATH = argMap.jobMeta || process.env.JOB_META_PATH || null;
 
 const USER_DATA_DIR =
@@ -57,7 +57,9 @@ function updateJobMeta(status, extra = {}) {
   if (!JOB_META_PATH) return;
   try {
     let meta = {};
-    if (fs.existsSync(JOB_META_PATH)) meta = JSON.parse(fs.readFileSync(JOB_META_PATH, "utf-8"));
+    if (fs.existsSync(JOB_META_PATH)) {
+      meta = JSON.parse(fs.readFileSync(JOB_META_PATH, "utf-8"));
+    }
     meta.status = status;
     meta.finished_at = new Date().toISOString();
     Object.assign(meta, extra);
@@ -122,9 +124,9 @@ async function dismissWelcomeIfPresent(page) {
   try {
     await page.evaluate(() => {
       const app = document.querySelector("ucs-standalone-app");
-      if (!app?.shadowRoot) return false;
+      if (!app || !app.shadowRoot) return false;
       const welcome = app.shadowRoot.querySelector("ucs-welcome-dialog");
-      if (!welcome?.shadowRoot) return false;
+      if (!welcome || !welcome.shadowRoot) return false;
       const dlg = welcome.shadowRoot.querySelector("md-dialog");
       if (!dlg) return false;
 
@@ -136,7 +138,6 @@ async function dismissWelcomeIfPresent(page) {
           if (innerBtn) label = innerBtn.innerText.trim();
         }
         if (!label) label = mdBtn.innerText.trim();
-
         if (label.includes("I'll do this later")) {
           const target = (mdBtn.shadowRoot && (mdBtn.shadowRoot.querySelector("button") || mdBtn)) || mdBtn;
           target.click();
@@ -177,7 +178,7 @@ async function clickAgreeButton(page) {
   return false;
 }
 
-// ========= ACCOUNT RESET (kept) =========
+// ========= ACCOUNT RESET (kept minimal) =========
 async function handleAccountReset(page) {
   console.log("♻️ Reset Check...");
   try {
@@ -321,14 +322,12 @@ async function checkBannedError(page) {
   });
 }
 
-// ========= AUTO CLICKER (optional) =========
+// ========= OPTIONAL AUTO CLICKER =========
 async function injectAutoClicker(page) {
   await page.evaluate(() => {
     window.autoClickerInterval = setInterval(() => {
       try {
-        const app = document.querySelector("ucs-standalone-app");
-        if (!app) return;
-        // optional: keep as your old logic, left minimal
+        // Keep empty/minimal — you can add back your old clicker if needed
       } catch (_) {}
     }, 500);
   });
@@ -336,94 +335,156 @@ async function injectAutoClicker(page) {
 
 // ========= OPEN TOOLS MENU =========
 async function openToolsAndClickGenerate(page) {
-  await page.evaluate(() => {
-    const app = document.querySelector("ucs-standalone-app");
-    if (!app?.shadowRoot) return false;
+  // Keep your original logic OR minimal wait — structure can change, so don't hard fail
+  try {
+    await page.evaluate(() => {
+      // try to open tools if available, ignore if not found
+      const app = document.querySelector("ucs-standalone-app");
+      if (!app || !app.shadowRoot) return false;
 
-    const landing = app.shadowRoot.querySelector("ucs-chat-landing");
-    if (!landing?.shadowRoot) return false;
+      // Attempt to locate any "tools" button by searching inside shadow roots quickly
+      function deepFind(root, predicate) {
+        const q = [root];
+        const seen = new Set();
+        while (q.length) {
+          const n = q.shift();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+          try {
+            if (predicate(n)) return n;
+          } catch (_) {}
+          if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+          if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+        }
+        return null;
+      }
 
-    const hostDiv = landing.shadowRoot.querySelector("div > div > div > div:nth-child(1)");
-    if (!hostDiv) return false;
+      const toolsBtn = deepFind(app, (n) => {
+        const tag = (n.tagName || "").toLowerCase();
+        if (tag !== "button" && tag !== "md-icon-button") return false;
+        const ar = (n.getAttribute?.("aria-label") || "").toLowerCase();
+        const t = (n.getAttribute?.("title") || "").toLowerCase();
+        const txt = (n.innerText || "").toLowerCase();
+        return ar.includes("tools") || t.includes("tools") || txt.includes("tools");
+      });
 
-    const searchBar = hostDiv.querySelector("ucs-search-bar");
-    if (!searchBar?.shadowRoot) return false;
-
-    const form = searchBar.shadowRoot.querySelector("form");
-    if (!form) return false;
-
-    const toolsRow = form.querySelector("div.tools-button-container");
-    const btn =
-      toolsRow?.querySelector(".tooltip-wrapper button, .tooltip-wrapper md-icon-button, .tooltip-wrapper md-text-button");
-    if (!btn) return false;
-
-    btn.click();
-    return true;
-  });
-
-  await sleep(1500);
-
-  await page.evaluate(() => {
-    const visited = new Set();
-    function walk(node, out) {
-      if (!node || visited.has(node)) return;
-      visited.add(node);
-      if (node.querySelectorAll) node.querySelectorAll("md-menu-item").forEach((x) => out.push(x));
-      if (node.shadowRoot) walk(node.shadowRoot, out);
-      if (node.childNodes) node.childNodes.forEach((c) => walk(c, out));
-    }
-    const items = [];
-    walk(document, items);
-    if (!items.length) return false;
-
-    const targetText = "Generate images (Pro)";
-    for (const it of items) {
-      const txt = (it.innerText || "").trim();
-      if (txt.includes(targetText)) {
-        (it.querySelector("li") || it).click();
+      if (toolsBtn) {
+        const clickTarget = toolsBtn.shadowRoot?.querySelector("button") || toolsBtn;
+        clickTarget.click();
         return true;
       }
-    }
+      return false;
+    });
 
-    // fallback
-    if (items[2]) {
-      (items[2].querySelector("li") || items[2]).click();
-      return true;
-    }
-    return false;
-  });
+    await sleep(1200);
 
-  await sleep(1500);
+    // Try click "Generate images (Pro)" menu item if it appears
+    await page.evaluate(() => {
+      const visited = new Set();
+      function walk(node, out) {
+        if (!node || visited.has(node)) return;
+        visited.add(node);
+        if (node.querySelectorAll) node.querySelectorAll("md-menu-item").forEach((x) => out.push(x));
+        if (node.shadowRoot) walk(node.shadowRoot, out);
+        if (node.childNodes) node.childNodes.forEach((c) => walk(c, out));
+      }
+      const items = [];
+      walk(document, items);
+
+      const targetText = "Generate images (Pro)";
+      for (const it of items) {
+        const txt = (it.innerText || "").trim();
+        if (txt.includes(targetText)) {
+          (it.querySelector("li") || it).click();
+          return true;
+        }
+      }
+      return false;
+    });
+
+    await sleep(1200);
+  } catch (_) {
+    // ignore
+  }
 }
 
-// ========= ✅ PROMPT ENTER + EXACT SUBMIT CLICK =========
+// ========= ✅ CORE FIX: ENTER PROMPT + CLICK SUBMIT WITHOUT ASSUMING STRUCTURE =========
 
-// 1) Focus ProseMirror inside ucs-prosemirror-editor shadow
-async function focusProseMirror(page) {
+// Wait until ProseMirror exists anywhere (deep shadow)
+async function waitForProseMirror(page, timeoutMs = 20000) {
+  await page.waitForFunction(
+    () => {
+      function deepExists(root) {
+        const q = [root];
+        const seen = new Set();
+        while (q.length) {
+          const n = q.shift();
+          if (!n || seen.has(n)) continue;
+          seen.add(n);
+
+          // direct match
+          if (n.nodeType === 1) {
+            const el = n;
+            if (
+              el.matches &&
+              el.matches('div.ProseMirror[contenteditable="true"], div.ProseMirror[contenteditable="true"] *')
+            ) {
+              // if inner, parent might be ProseMirror, ok
+              return true;
+            }
+            if (el.matches && el.matches('div.ProseMirror[contenteditable="true"]')) return true;
+          }
+
+          if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+          if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+        }
+        return false;
+      }
+      return deepExists(document);
+    },
+    { timeout: timeoutMs }
+  );
+}
+
+// Focus ProseMirror and place caret
+async function focusProseMirrorDeep(page) {
   const res = await page.evaluate(() => {
-    const app = document.querySelector("ucs-standalone-app");
-    if (!app?.shadowRoot) return { ok: false, reason: "no_app_shadow" };
+    function deepFind(root, predicate) {
+      const q = [root];
+      const seen = new Set();
+      while (q.length) {
+        const n = q.shift();
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
+        try {
+          if (predicate(n)) return n;
+        } catch (_) {}
+        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+      }
+      return null;
+    }
 
-    const landing = app.shadowRoot.querySelector("ucs-chat-landing");
-    if (!landing?.shadowRoot) return { ok: false, reason: "no_landing_shadow" };
+    // find the ProseMirror contenteditable
+    const pm = deepFind(document, (n) => {
+      if (!n || !n.matches) return false;
+      return n.matches('div.ProseMirror[contenteditable="true"]');
+    });
 
-    const hostDiv = landing.shadowRoot.querySelector("div > div > div > div:nth-child(1)");
-    if (!hostDiv) return { ok: false, reason: "no_hostDiv" };
-
-    const searchBar = hostDiv.querySelector("ucs-search-bar");
-    if (!searchBar?.shadowRoot) return { ok: false, reason: "no_searchbar_shadow" };
-
-    const form = searchBar.shadowRoot.querySelector("form");
-    if (!form) return { ok: false, reason: "no_form" };
-
-    const editorHost = form.querySelector("ucs-prosemirror-editor");
-    if (!editorHost?.shadowRoot) return { ok: false, reason: "no_editor_shadow" };
-
-    const pm = editorHost.shadowRoot.querySelector('div.ProseMirror[contenteditable="true"]');
-    if (!pm) return { ok: false, reason: "no_prosemirror" };
+    if (!pm) return { ok: false, reason: "no_prosemirror_found" };
 
     pm.scrollIntoView({ block: "center", behavior: "instant" });
     pm.focus();
+
+    // caret at end
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(pm);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (_) {}
 
     return { ok: true };
   });
@@ -431,29 +492,32 @@ async function focusProseMirror(page) {
   if (!res.ok) throw new Error(`Focus editor failed: ${res.reason}`);
 }
 
-// 2) Click exact submit button inside md-icon-button shadowRoot -> button#button[aria-label="Submit"]
-async function clickExactSubmit(page) {
+// Click Submit button inside md-icon-button shadowRoot (deep)
+async function clickSubmitDeep(page) {
   const clicked = await page.evaluate(() => {
-    const app = document.querySelector("ucs-standalone-app");
-    if (!app?.shadowRoot) return false;
+    function deepFindAll(root, predicate) {
+      const q = [root];
+      const seen = new Set();
+      const out = [];
+      while (q.length) {
+        const n = q.shift();
+        if (!n || seen.has(n)) continue;
+        seen.add(n);
+        try {
+          if (predicate(n)) out.push(n);
+        } catch (_) {}
+        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+      }
+      return out;
+    }
 
-    const landing = app.shadowRoot.querySelector("ucs-chat-landing");
-    if (!landing?.shadowRoot) return false;
+    // Find ALL md-icon-button nodes
+    const iconButtons = deepFindAll(document, (n) => {
+      return n.tagName && n.tagName.toLowerCase() === "md-icon-button";
+    });
 
-    const hostDiv = landing.shadowRoot.querySelector("div > div > div > div:nth-child(1)");
-    if (!hostDiv) return false;
-
-    const searchBar = hostDiv.querySelector("ucs-search-bar");
-    if (!searchBar?.shadowRoot) return false;
-
-    const form = searchBar.shadowRoot.querySelector("form");
-    if (!form) return false;
-
-    // form/div/div[2]/md-icon-button//button  -> inner button is in shadowRoot
-    const iconButtons = Array.from(form.querySelectorAll("md-icon-button"));
-    if (!iconButtons.length) return false;
-
-    // Find the one that contains Submit button in its shadow
+    // Try exact: md-icon-button.shadowRoot -> button#button[aria-label="Submit"]
     for (const ib of iconButtons) {
       const sr = ib.shadowRoot;
       if (!sr) continue;
@@ -464,15 +528,15 @@ async function clickExactSubmit(page) {
       }
     }
 
-    // Fallback: any shadow button with aria-label Submit
-    for (const ib of iconButtons) {
-      const sr = ib.shadowRoot;
-      if (!sr) continue;
-      const btn = sr.querySelector('button[aria-label="Submit"]');
-      if (btn) {
-        btn.click();
-        return true;
-      }
+    // Fallback: any button[aria-label=Submit] inside any shadow
+    const submitBtns = deepFindAll(document, (n) => {
+      if (!n || !n.matches) return false;
+      return n.matches('button[aria-label="Submit"]');
+    });
+
+    if (submitBtns.length) {
+      submitBtns[0].click();
+      return true;
     }
 
     return false;
@@ -482,26 +546,27 @@ async function clickExactSubmit(page) {
 }
 
 async function enterPromptAndSend(page, promptText) {
-  // Focus editor
-  await focusProseMirror(page);
-  await sleep(200);
+  // Ensure editor exists
+  await waitForProseMirror(page, 25000);
 
-  // CTRL+A, Backspace, type prompt
+  // Focus editor without assuming searchbar/landing
+  await focusProseMirrorDeep(page);
+  await sleep(150);
+
+  // Clear and type using keyboard (most reliable)
   await page.keyboard.down("Control");
   await page.keyboard.press("A");
   await page.keyboard.up("Control");
-  await sleep(50);
   await page.keyboard.press("Backspace");
-  await sleep(80);
+  await sleep(50);
 
   await page.keyboard.type(promptText, { delay: 2 });
-  await sleep(250);
+  await sleep(200);
 
-  // Click exact submit
-  const submitted = await clickExactSubmit(page);
-
-  if (!submitted) {
-    console.log("⚠️ Exact Submit not found. Fallback Enter key...");
+  // Click submit
+  const ok = await clickSubmitDeep(page);
+  if (!ok) {
+    console.log("⚠️ Submit not found, fallback ENTER...");
     await page.keyboard.press("Enter");
   }
 }
@@ -615,6 +680,7 @@ async function main() {
         globalIndex += batchPrompts.length;
 
         console.log("🚀 Submitting prompts...");
+
         await Promise.all(
           batchJobs.map(async (job) => {
             console.log(` [Image ${job.sceneNumber}] Submitting...`);
