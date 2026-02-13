@@ -613,7 +613,7 @@ async function openToolsAndClickGenerate(page) {
     const items = findMenuItemsInShadows();
     if (!items.length) return false;
     // CHANGED: Search for "Create images" instead of "Create a Image Pro"
-    const TARGET_TEXT = "Create images";
+    const TARGET_TEXT = "Generate images (Pro) 🍌";
     for (let i = 0; i < items.length; i++) {
       const txt = (items[i].innerText || "").trim();
       if (txt.includes(TARGET_TEXT)) {
