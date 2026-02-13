@@ -1,7 +1,15 @@
 // generate_image.js
-// ✅ Multi-tabs: prompt PASTE at once (NO typing)
-// ✅ Submit click ROBUST (works even when inner button is inside closed shadow)
-// ✅ Uses multiple fallback strategies + coordinate click
+//
+// ✅ PHASE 1: All tabs -> prompt PASTE (NO typing, NO innerHTML, TrustedTypes safe)
+// ✅ PHASE 2: All tabs -> SUBMIT click (mouse coordinate click; works even with closed shadow)
+// ✅ Still keeps your login/reset logic
+//
+// Run:
+// node generate_image.js --promptFile=prompts.txt --maxTabs=5 --headless=false
+//
+// Env (recommended):
+// set GEMINI_EMAIL=...
+// set GEMINI_PASSWORD=...
 
 const fs = require("fs");
 const path = require("path");
@@ -149,7 +157,7 @@ async function clickAgreeButton(page) {
   try {
     if (await isElementPresent(page, ".agree-button", 4000)) {
       await page.click(".agree-button");
-      await sleep(4000);
+      await sleep(3500);
       await dismissWelcomeIfPresent(page);
       return true;
     }
@@ -165,7 +173,7 @@ async function clickAgreeButton(page) {
     });
 
     if (clickedByText) {
-      await sleep(4000);
+      await sleep(3500);
       await dismissWelcomeIfPresent(page);
       return true;
     }
@@ -193,6 +201,7 @@ async function handleAccountReset(page) {
     return;
   }
 
+  console.log("⚠️ Agree not found. Deleting account...");
   await page.goto(SETTINGS_URL, { waitUntil: "networkidle2" });
   await sleep(5000);
 
@@ -273,34 +282,57 @@ async function ensureLoggedInOnFirstTab(page) {
   console.log("✅ Ready.");
 }
 
-// ========= DEEP SHADOW: WAIT EDITOR =========
+// ========= DEEP SHADOW UTIL =========
+function deepWalkAllNodes() {
+  // Runs in browser context (page.evaluate)
+  const q = [document];
+  const seen = new Set();
+  const out = [];
+  while (q.length) {
+    const n = q.shift();
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+    if (n.shadowRoot) {
+      q.push(n.shadowRoot);
+      n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+    }
+    if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+    if (n.childNodes) Array.from(n.childNodes).forEach((x) => q.push(x));
+  }
+  return out;
+}
+
 async function waitForProseMirrorDeep(page, timeoutMs = 30000) {
   await page.waitForFunction(
     () => {
-      function deepHas(root) {
-        const q = [root];
+      const nodes = (() => {
+        const q = [document];
         const seen = new Set();
         while (q.length) {
           const n = q.shift();
           if (!n || seen.has(n)) continue;
           seen.add(n);
           if (n.nodeType === 1 && n.matches && n.matches('div.ProseMirror[contenteditable="true"]')) return true;
-          if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+          if (n.shadowRoot) {
+            q.push(n.shadowRoot);
+            n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+          }
           if (n.children) Array.from(n.children).forEach((x) => q.push(x));
         }
         return false;
-      }
-      return deepHas(document);
+      })();
+      return nodes === true;
     },
     { timeout: timeoutMs }
   );
 }
 
-// ========= ✅ PASTE PROMPT (NO TYPE) =========
-async function pastePromptDeep(page, promptText) {
+// ========= ✅ TRUSTED-TYPES SAFE PASTE (NO innerHTML) =========
+async function pastePromptTrustedSafe(page, promptText) {
   const res = await page.evaluate((text) => {
-    function deepFind(root, predicate) {
-      const q = [root];
+    function deepFind(predicate) {
+      const q = [document];
       const seen = new Set();
       while (q.length) {
         const n = q.shift();
@@ -309,13 +341,16 @@ async function pastePromptDeep(page, promptText) {
         try {
           if (predicate(n)) return n;
         } catch (_) {}
-        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        if (n.shadowRoot) {
+          q.push(n.shadowRoot);
+          n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        }
         if (n.children) Array.from(n.children).forEach((x) => q.push(x));
       }
       return null;
     }
 
-    const pm = deepFind(document, (n) => n?.matches?.('div.ProseMirror[contenteditable="true"]'));
+    const pm = deepFind((n) => n?.matches?.('div.ProseMirror[contenteditable="true"]'));
     if (!pm) return { ok: false, reason: "no_prosemirror" };
 
     pm.scrollIntoView({ block: "center", behavior: "instant" });
@@ -330,150 +365,142 @@ async function pastePromptDeep(page, promptText) {
       sel.addRange(range);
     } catch (_) {}
 
-    // Try paste event
-    let pasteWorked = false;
+    // Try beforeinput (ProseMirror likes this)
+    let inserted = false;
     try {
-      const dt = new DataTransfer();
-      dt.setData("text/plain", text);
-      const evt = new ClipboardEvent("paste", {
+      const evt = new InputEvent("beforeinput", {
         bubbles: true,
         cancelable: true,
-        clipboardData: dt,
+        inputType: "insertText",
+        data: text,
       });
-      const dispatched = pm.dispatchEvent(evt);
-      pasteWorked = dispatched === true;
+      const ok = pm.dispatchEvent(evt);
+      // If not prevented, we can execCommand
+      inserted = ok === true;
     } catch (_) {}
 
-    if (!pasteWorked) {
-      // fallback direct set
-      pm.innerHTML = "";
-      const p = document.createElement("p");
-      p.innerText = text;
-      pm.appendChild(p);
+    // execCommand insertText (best for contenteditable; does NOT use innerHTML)
+    try {
+      // clear selection content then insert
+      document.execCommand("insertText", false, text);
+      inserted = true;
+    } catch (_) {}
 
+    // Force input event so app sees change
+    try {
+      pm.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    } catch (_) {
       try {
-        pm.dispatchEvent(new InputEvent("input", { bubbles: true }));
-      } catch (_) {
         const e = document.createEvent("HTMLEvents");
         e.initEvent("input", true, true);
         pm.dispatchEvent(e);
-      }
-      pm.dispatchEvent(new Event("change", { bubbles: true }));
+      } catch (_) {}
     }
 
-    // Ensure input
-    try {
-      pm.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    } catch (_) {}
-
-    return { ok: true };
+    return { ok: inserted === true };
   }, promptText);
 
-  if (!res?.ok) throw new Error(`paste failed: ${res?.reason || "unknown"}`);
+  if (!res?.ok) throw new Error(`Paste failed: ${res?.reason || "unknown"}`);
 }
 
-// ========= ✅ ROBUST SUBMIT CLICK =========
-async function clickSubmitRobust(page) {
-  // 1) Try to click in-page via deep traversal (open shadows only)
-  const r1 = await page.evaluate(() => {
-    function deepFind(root, predicate) {
-      const q = [root];
+// ========= ✅ FIND SUBMIT CLICK POINT (works even if button inside closed shadow) =========
+async function getSubmitClickPoint(page) {
+  return page.evaluate(() => {
+    function deepFindAll(predicate) {
+      const q = [document];
       const seen = new Set();
+      const found = [];
       while (q.length) {
         const n = q.shift();
         if (!n || seen.has(n)) continue;
         seen.add(n);
         try {
-          if (predicate(n)) return n;
+          if (predicate(n)) found.push(n);
         } catch (_) {}
-        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        if (n.shadowRoot) {
+          q.push(n.shadowRoot);
+          n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+        }
         if (n.children) Array.from(n.children).forEach((x) => q.push(x));
       }
-      return null;
+      return found;
     }
 
-    // A) exact aria-label submit
-    const btnSubmit = deepFind(document, (n) => n?.matches?.('button[aria-label="Submit"]'));
-    if (btnSubmit) {
-      btnSubmit.click();
-      return { ok: true, method: "deep_button_submit" };
+    // Prefer explicit button aria-label
+    const btns = deepFindAll((n) => n?.matches?.('button[aria-label]'));
+    const wanted = btns.filter((b) => {
+      const ar = (b.getAttribute("aria-label") || "").toLowerCase();
+      return ar.includes("submit") || ar.includes("send") || ar.includes("generate") || ar.includes("search");
+    });
+
+    function centerOf(el) {
+      const r = el.getBoundingClientRect();
+      if (!r || r.width < 2 || r.height < 2) return null;
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      // must be on-screen
+      if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return null;
+      return { x, y };
     }
 
-    // B) common variants
-    const btnSend = deepFind(document, (n) => n?.matches?.('button[aria-label="Send"]'));
-    if (btnSend) {
-      btnSend.click();
-      return { ok: true, method: "deep_button_send" };
+    // 1) direct wanted button
+    for (let i = wanted.length - 1; i >= 0; i--) {
+      const c = centerOf(wanted[i]);
+      if (c) return { ...c, why: "aria_button" };
     }
 
-    const btnGen = deepFind(document, (n) => n?.matches?.('button[aria-label*="Generate"]'));
-    if (btnGen) {
-      btnGen.click();
-      return { ok: true, method: "deep_button_generate" };
+    // 2) md-icon-button hosts (often clickable even if inner closed shadow)
+    const icons = deepFindAll((n) => (n?.tagName || "").toLowerCase() === "md-icon-button");
+    // try to pick last visible
+    for (let i = icons.length - 1; i >= 0; i--) {
+      const c = centerOf(icons[i]);
+      if (c) return { ...c, why: "md_icon_button_host" };
     }
 
-    // C) click host md-icon-button (works when inner button is in closed shadow)
-    const iconBtn = deepFind(document, (n) => (n?.tagName || "").toLowerCase() === "md-icon-button");
-    if (iconBtn) {
-      iconBtn.click();
-      return { ok: true, method: "click_md_icon_button_host" };
-    }
-
-    // D) role=button + label contains submit/send
-    const roleBtn = deepFind(document, (n) => {
+    // 3) any element with role=button + aria-label keywords
+    const roleBtns = deepFindAll((n) => {
       if (!n?.getAttribute) return false;
       const role = (n.getAttribute("role") || "").toLowerCase();
       if (role !== "button") return false;
       const ar = (n.getAttribute("aria-label") || "").toLowerCase();
       const txt = (n.innerText || "").toLowerCase();
-      return ar.includes("submit") || ar.includes("send") || txt.includes("submit") || txt.includes("send");
+      return (
+        ar.includes("submit") ||
+        ar.includes("send") ||
+        ar.includes("generate") ||
+        txt.includes("submit") ||
+        txt.includes("send") ||
+        txt.includes("generate")
+      );
     });
-    if (roleBtn) {
-      roleBtn.click();
-      return { ok: true, method: "role_button_click" };
+    for (let i = roleBtns.length - 1; i >= 0; i--) {
+      const c = centerOf(roleBtns[i]);
+      if (c) return { ...c, why: "role_button" };
     }
 
-    // Nothing found in open shadows
-    return { ok: false, method: "no_dom_click_target" };
+    return null;
   });
-
-  if (r1?.ok) return { ok: true, method: r1.method };
-
-  // 2) Node-side fallback: click last md-icon-button (host) using Puppeteer handles
-  try {
-    const icons = await page.$$("md-icon-button");
-    if (icons && icons.length) {
-      await icons[icons.length - 1].click({ delay: 10 });
-      return { ok: true, method: "puppeteer_click_md_icon_button_last" };
-    }
-  } catch (_) {}
-
-  // 3) Coordinates click fallback on last md-icon-button (host rect)
-  try {
-    const coords = await page.evaluate(() => {
-      const nodes = Array.from(document.querySelectorAll("md-icon-button"));
-      if (!nodes.length) return null;
-      const el = nodes[nodes.length - 1];
-      const r = el.getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    });
-    if (coords) {
-      await page.mouse.click(coords.x, coords.y);
-      return { ok: true, method: "mouse_click_md_icon_button_center" };
-    }
-  } catch (_) {}
-
-  return { ok: false, method: "all_submit_methods_failed" };
 }
 
-// ========= OPTIONAL TOOL SWITCH (tolerant) =========
+async function clickSubmitByMouse(page) {
+  const pt = await getSubmitClickPoint(page);
+  if (!pt) return { ok: false, method: "no_click_point" };
+
+  // IMPORTANT: Some UIs need small jitter / double click
+  await page.mouse.click(pt.x, pt.y);
+  await page.waitForTimeout(120);
+  await page.mouse.click(pt.x, pt.y);
+  return { ok: true, method: pt.why };
+}
+
+// ========= TOOL MENU (optional - tolerant) =========
 async function openToolsAndClickGenerate(page) {
-  // If this fails, ignore. Prompt+Submit will still try.
+  // If already in image mode, this can fail safely.
   try {
     await page.evaluate(() => {
-      function deepFind(root, predicate) {
-        const q = [root];
-        const seen = new Set();
+      const q = [document];
+      const seen = new Set();
+      function deepFind(predicate) {
         while (q.length) {
           const n = q.shift();
           if (!n || seen.has(n)) continue;
@@ -481,16 +508,16 @@ async function openToolsAndClickGenerate(page) {
           try {
             if (predicate(n)) return n;
           } catch (_) {}
-          if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+          if (n.shadowRoot) {
+            q.push(n.shadowRoot);
+            n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
+          }
           if (n.children) Array.from(n.children).forEach((x) => q.push(x));
         }
         return null;
       }
 
-      const app = document.querySelector("ucs-standalone-app");
-      if (!app) return false;
-
-      const toolsBtn = deepFind(app, (n) => {
+      const toolsBtn = deepFind((n) => {
         if (!n?.getAttribute) return false;
         const ar = (n.getAttribute("aria-label") || "").toLowerCase();
         const t = (n.getAttribute("title") || "").toLowerCase();
@@ -503,7 +530,7 @@ async function openToolsAndClickGenerate(page) {
       return true;
     });
 
-    await sleep(1000);
+    await sleep(1100);
 
     await page.evaluate(() => {
       const visited = new Set();
@@ -624,7 +651,6 @@ async function main() {
       defaultViewport: { width: 1280, height: 720 },
       userDataDir: USER_DATA_DIR,
     };
-
     if (BROWSER_PATH) launchOptions.executablePath = BROWSER_PATH;
 
     console.log(`📂 Using Profile Directory: ${USER_DATA_DIR}`);
@@ -667,7 +693,7 @@ async function main() {
           })
         );
 
-        await sleep(4000);
+        await sleep(3500);
 
         const batchJobs = pages.map((page, idx) => ({
           page,
@@ -678,27 +704,51 @@ async function main() {
         }));
         globalIndex += batchPrompts.length;
 
-        console.log("🚀 PASTE + SUBMIT on all tabs at once...");
-
-        // ✅ All tabs: paste + robust submit
+        // ===========================
+        // ✅ PHASE 0 (optional): tool mode attempt
+        // ===========================
         await Promise.all(
           batchJobs.map(async (job) => {
-            console.log(` [Image ${job.sceneNumber}] Pasting...`);
             try {
-              await openToolsAndClickGenerate(job.page); // tolerant
+              await openToolsAndClickGenerate(job.page);
+            } catch (_) {}
+          })
+        );
+
+        // ===========================
+        // ✅ PHASE 1: PASTE ALL TABS (AT A TIME)
+        // ===========================
+        console.log("\n🚀 PHASE 1: Pasting prompts on ALL tabs...");
+        await Promise.all(
+          batchJobs.map(async (job) => {
+            console.log(` [Image ${job.sceneNumber}] Paste...`);
+            try {
               await waitForProseMirrorDeep(job.page, 30000);
-              await pastePromptDeep(job.page, job.prompt);
-
-              const submitRes = await clickSubmitRobust(job.page);
-              if (!submitRes.ok) {
-                console.log(` ⚠️ [Image ${job.sceneNumber}] Submit failed: ${submitRes.method}`);
-              } else {
-                console.log(` ✅ [Image ${job.sceneNumber}] Submitted (${submitRes.method})`);
-              }
-
-              job.startTime = Date.now();
+              await pastePromptTrustedSafe(job.page, job.prompt);
+              console.log(` ✅ [Image ${job.sceneNumber}] Pasted`);
             } catch (e) {
-              console.error(` ❌ [Image ${job.sceneNumber}] Failed:`, e.message);
+              console.error(` ❌ [Image ${job.sceneNumber}] Paste Failed:`, e.message);
+            }
+          })
+        );
+
+        // Small settle time so UI enables submit
+        await sleep(600);
+
+        // ===========================
+        // ✅ PHASE 2: SUBMIT ALL TABS (AT A TIME)
+        // ===========================
+        console.log("\n🚀 PHASE 2: Submitting on ALL tabs...");
+        await Promise.all(
+          batchJobs.map(async (job) => {
+            console.log(` [Image ${job.sceneNumber}] Submit...`);
+            try {
+              const r = await clickSubmitByMouse(job.page);
+              if (!r.ok) throw new Error(r.method);
+              job.startTime = Date.now();
+              console.log(` ✅ [Image ${job.sceneNumber}] Submitted (${r.method})`);
+            } catch (e) {
+              console.error(` ❌ [Image ${job.sceneNumber}] Submit Failed:`, e.message);
               job.startTime = Date.now();
             }
           })
@@ -728,7 +778,7 @@ async function main() {
 
               const banned = await checkBannedError(job.page);
               if (banned) {
-                console.log(`❌ Image ${job.sceneNumber}: banned-answer.`);
+                console.log(`❌ Image ${job.sceneNumber}: banned.`);
                 job.finished = true;
                 continue;
               }
@@ -736,7 +786,7 @@ async function main() {
               const elapsed = Date.now() - job.startTime;
               const TIMEOUT_MS = 200000;
               if (elapsed > TIMEOUT_MS) {
-                console.log(`⏩ Image ${job.sceneNumber} timeout (>200s). Skipping.`);
+                console.log(`⏩ Image ${job.sceneNumber} timeout. Skipping.`);
                 job.finished = true;
                 continue;
               }
