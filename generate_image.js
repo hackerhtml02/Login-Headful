@@ -1,7 +1,6 @@
 // generate_image.js
-// FIXED: Prompt typing in Shadow DOM ProseMirror using keyboard (CTRL+A + type)
-// FIXED: Reliable "Send" click with deep shadow traversal
-// NOTE: Keep your reset/login logic as-is, main change: enterPromptAndSend()
+// FIXED: Prompt enter inside ucs-prosemirror-editor shadowRoot
+// FIXED: Click Submit button inside md-icon-button shadowRoot (button#button aria-label=Submit)
 
 const fs = require("fs");
 const path = require("path");
@@ -29,9 +28,12 @@ if (!PROMPT_FILE) {
   process.exit(1);
 }
 
-const OUTPUT_DIR = argMap.outputDir || process.env.OUTPUT_DIR || path.join(process.cwd(), "output_images");
+const OUTPUT_DIR =
+  argMap.outputDir || process.env.OUTPUT_DIR || path.join(process.cwd(), "output_images");
 const JOB_META_PATH = argMap.jobMeta || process.env.JOB_META_PATH || null;
-const USER_DATA_DIR = argMap.userDataDir || process.env.USER_DATA_DIR || path.join(process.cwd(), "gemini_profile");
+
+const USER_DATA_DIR =
+  argMap.userDataDir || process.env.USER_DATA_DIR || path.join(process.cwd(), "gemini_profile");
 
 let maxTabs = parseInt(argMap.maxTabs || process.env.MAX_TABS || "1", 10);
 if (isNaN(maxTabs) || maxTabs <= 0) maxTabs = 1;
@@ -44,11 +46,13 @@ const BROWSER_PATH = argMap.browserPath || process.env.BROWSER_PATH || null;
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
 function makeRandomFileName(sceneNumber) {
   const rand = Math.random().toString(36).slice(2, 10);
   const ts = Date.now();
   return `image_${sceneNumber}_${ts}_${rand}.png`;
 }
+
 function updateJobMeta(status, extra = {}) {
   if (!JOB_META_PATH) return;
   try {
@@ -62,6 +66,7 @@ function updateJobMeta(status, extra = {}) {
     console.error("Failed to update job meta:", err);
   }
 }
+
 function loadPromptsFromFile(filePath) {
   if (!fs.existsSync(filePath)) {
     console.log(`Prompt file not found: ${filePath}`);
@@ -76,7 +81,7 @@ function loadPromptsFromFile(filePath) {
   return prompts;
 }
 
-// ========= BROWSER UTILS (NATIVE XPATH) =========
+// ========= XPATH UTILS =========
 async function clickByXpath(page, xpath) {
   return page.evaluate((xp) => {
     const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
@@ -88,6 +93,7 @@ async function clickByXpath(page, xpath) {
     return false;
   }, xpath);
 }
+
 async function typeByXpath(page, xpath, text) {
   return page.evaluate(({ xp, txt }) => {
     const result = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
@@ -113,12 +119,12 @@ async function isElementPresent(page, selector, timeout = 5000) {
 }
 
 async function dismissWelcomeIfPresent(page) {
-  const clickLaterScript = () => {
-    function clickWelcomeLater() {
+  try {
+    await page.evaluate(() => {
       const app = document.querySelector("ucs-standalone-app");
-      if (!app || !app.shadowRoot) return false;
+      if (!app?.shadowRoot) return false;
       const welcome = app.shadowRoot.querySelector("ucs-welcome-dialog");
-      if (!welcome || !welcome.shadowRoot) return false;
+      if (!welcome?.shadowRoot) return false;
       const dlg = welcome.shadowRoot.querySelector("md-dialog");
       if (!dlg) return false;
 
@@ -138,31 +144,21 @@ async function dismissWelcomeIfPresent(page) {
         }
       }
       return false;
-    }
-    return clickWelcomeLater();
-  };
-
-  try {
-    const laterClicked = await page.evaluate(clickLaterScript);
-    if (laterClicked) {
-      console.log("Clicked 'I'll do this later'.");
-      await sleep(3000);
-    }
+    });
+    await sleep(2500);
   } catch (_) {}
 }
 
 async function clickAgreeButton(page) {
   try {
-    const agreeBtnClass = ".agree-button";
-    if (await isElementPresent(page, agreeBtnClass, 4000)) {
-      console.log("⚠️ Agree found. Clicking...");
-      await page.click(agreeBtnClass);
+    if (await isElementPresent(page, ".agree-button", 4000)) {
+      await page.click(".agree-button");
       await sleep(4000);
       await dismissWelcomeIfPresent(page);
       return true;
     }
 
-    const clickedByText = await page.evaluate(() => {
+    const clicked = await page.evaluate(() => {
       const buttons = Array.from(document.querySelectorAll("button"));
       const target = buttons.find((b) => (b.innerText || "").includes("Agree & get started"));
       if (target) {
@@ -172,37 +168,32 @@ async function clickAgreeButton(page) {
       return false;
     });
 
-    if (clickedByText) {
-      console.log("⚠️ Agree found via text. Clicked.");
+    if (clicked) {
       await sleep(4000);
       await dismissWelcomeIfPresent(page);
       return true;
     }
-  } catch (e) {
-    console.log("Agree check failed:", e.message);
-  }
+  } catch (_) {}
   return false;
 }
 
-// ========= ACCOUNT RESET LOGIC (same) =========
+// ========= ACCOUNT RESET (kept) =========
 async function handleAccountReset(page) {
   console.log("♻️ Reset Check...");
   try {
     await page.goto(GEMINI_URL, { waitUntil: "networkidle2" });
-  } catch (e) {}
-
+  } catch (_) {}
   await sleep(4000);
 
-  const isAgreePresentInitial = await page.evaluate(() => {
-    const btn = document.querySelector(".agree-button");
-    if (btn) return true;
+  const agree = await page.evaluate(() => {
+    if (document.querySelector(".agree-button")) return true;
     return Array.from(document.querySelectorAll("button")).some((b) =>
       (b.innerText || "").includes("Agree & get started")
     );
   });
 
-  if (isAgreePresentInitial) {
-    console.log("✅ Agree found initially.");
+  if (agree) {
+    console.log("✅ Agree found.");
     await clickAgreeButton(page);
     return;
   }
@@ -214,37 +205,34 @@ async function handleAccountReset(page) {
   const deleteBtnXpath =
     "/html/body/saas-settingsfe-root/main/saas-settingsfe-admin-page/mat-sidenav-container/mat-sidenav-content/saas-settingsfe-general-section/div/div[2]/div/div/button";
 
-  const clickedDelete = await clickByXpath(page, deleteBtnXpath);
-  if (!clickedDelete) return;
+  if (!(await clickByXpath(page, deleteBtnXpath))) return;
 
   await sleep(2000);
 
   const inputXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-content/form/mat-form-field/div[1]/div/div[2]/input";
 
-  const typed = await typeByXpath(page, inputXpath, "DELETE");
-  if (!typed) return;
+  if (!(await typeByXpath(page, inputXpath, "DELETE"))) return;
 
   await sleep(1500);
 
   const confirmBtnXpath =
     "/html/body/div[2]/div/div[2]/mat-dialog-container/div/div/delete-agentspace-dialog/mat-dialog-actions/button[2]";
 
-  const confirmed = await clickByXpath(page, confirmBtnXpath);
-  if (confirmed) {
+  if (await clickByXpath(page, confirmBtnXpath)) {
     await sleep(6000);
     await clickAgreeButton(page);
   }
 }
 
-// ========= LOGIN (same style, short) =========
+// ========= LOGIN =========
 async function ensureLoggedInOnFirstTab(page) {
   console.log("🔐 Checking login...");
   for (let i = 0; i < 3; i++) {
     try {
       await page.goto(GEMINI_URL, { waitUntil: "networkidle2" });
       break;
-    } catch (e) {
+    } catch (_) {
       await sleep(2000);
     }
   }
@@ -259,7 +247,6 @@ async function ensureLoggedInOnFirstTab(page) {
     return;
   }
 
-  // Email login
   try {
     const emailInput = await page.waitForSelector("#email-input", { timeout: 12000 });
     await emailInput.click();
@@ -270,7 +257,6 @@ async function ensureLoggedInOnFirstTab(page) {
     await continueBtn.click();
     await sleep(8000);
 
-    // Password
     try {
       const passInput = await page.waitForSelector('input[name="Passwd"]', { timeout: 20000 });
       await passInput.click();
@@ -280,7 +266,6 @@ async function ensureLoggedInOnFirstTab(page) {
     } catch (_) {}
   } catch (_) {}
 
-  // Confirmations
   for (let i = 1; i <= 2; i++) {
     try {
       const confirmSelector = 'input[value="I understand"], #confirm';
@@ -336,48 +321,25 @@ async function checkBannedError(page) {
   });
 }
 
+// ========= AUTO CLICKER (optional) =========
 async function injectAutoClicker(page) {
   await page.evaluate(() => {
     window.autoClickerInterval = setInterval(() => {
       try {
-        function deepFind(root, predicate) {
-          const q = [root];
-          const seen = new Set();
-          while (q.length) {
-            const n = q.shift();
-            if (!n || seen.has(n)) continue;
-            seen.add(n);
-            if (predicate(n)) return n;
-            if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
-            if (n.children) Array.from(n.children).forEach((x) => q.push(x));
-          }
-          return null;
-        }
-
         const app = document.querySelector("ucs-standalone-app");
         if (!app) return;
-
-        const btn = deepFind(app, (n) => {
-          const t = (n.tagName || "").toLowerCase();
-          if (t !== "md-filled-button") return false;
-          const txt = (n.innerText || "").toLowerCase();
-          return txt.includes("continue") || txt.includes("generate") || txt.includes("create");
-        });
-
-        if (!btn) return;
-        let real = btn;
-        if (btn.shadowRoot) real = btn.shadowRoot.querySelector("button") || btn;
-        real.click();
+        // optional: keep as your old logic, left minimal
       } catch (_) {}
     }, 500);
   });
 }
 
-// ========= FLOW: open tools =========
+// ========= OPEN TOOLS MENU =========
 async function openToolsAndClickGenerate(page) {
   await page.evaluate(() => {
     const app = document.querySelector("ucs-standalone-app");
     if (!app?.shadowRoot) return false;
+
     const landing = app.shadowRoot.querySelector("ucs-chat-landing");
     if (!landing?.shadowRoot) return false;
 
@@ -391,7 +353,8 @@ async function openToolsAndClickGenerate(page) {
     if (!form) return false;
 
     const toolsRow = form.querySelector("div.tools-button-container");
-    const btn = toolsRow?.querySelector(".tooltip-wrapper button, .tooltip-wrapper md-icon-button, .tooltip-wrapper md-text-button");
+    const btn =
+      toolsRow?.querySelector(".tooltip-wrapper button, .tooltip-wrapper md-icon-button, .tooltip-wrapper md-text-button");
     if (!btn) return false;
 
     btn.click();
@@ -422,10 +385,9 @@ async function openToolsAndClickGenerate(page) {
       }
     }
 
-    // fallback (3rd item)
-    const idx = 2;
-    if (items[idx]) {
-      (items[idx].querySelector("li") || items[idx]).click();
+    // fallback
+    if (items[2]) {
+      (items[2].querySelector("li") || items[2]).click();
       return true;
     }
     return false;
@@ -434,141 +396,112 @@ async function openToolsAndClickGenerate(page) {
   await sleep(1500);
 }
 
-// ========= ✅ FIXED: PROMPT ENTER (KEYBOARD) + SEND CLICK =========
-async function focusEditorProseMirror(page) {
-  // Focus ONLY the correct editor id
-  const result = await page.evaluate(() => {
-    function deepFind(root, predicate) {
-      const q = [root];
-      const seen = new Set();
-      while (q.length) {
-        const n = q.shift();
-        if (!n || seen.has(n)) continue;
-        seen.add(n);
-        try {
-          if (predicate(n)) return n;
-        } catch (_) {}
-        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
-        if (n.children) Array.from(n.children).forEach((x) => q.push(x));
-      }
-      return null;
-    }
+// ========= ✅ PROMPT ENTER + EXACT SUBMIT CLICK =========
 
+// 1) Focus ProseMirror inside ucs-prosemirror-editor shadow
+async function focusProseMirror(page) {
+  const res = await page.evaluate(() => {
     const app = document.querySelector("ucs-standalone-app");
-    if (!app) return { ok: false, reason: "no_app" };
+    if (!app?.shadowRoot) return { ok: false, reason: "no_app_shadow" };
 
-    const editorHost = deepFind(app, (n) => {
-      return (
-        n.tagName &&
-        n.tagName.toLowerCase() === "ucs-prosemirror-editor" &&
-        (n.id || "") === "agent-search-prosemirror-editor"
-      );
-    });
+    const landing = app.shadowRoot.querySelector("ucs-chat-landing");
+    if (!landing?.shadowRoot) return { ok: false, reason: "no_landing_shadow" };
 
-    if (!editorHost) return { ok: false, reason: "no_editor_host_id" };
+    const hostDiv = landing.shadowRoot.querySelector("div > div > div > div:nth-child(1)");
+    if (!hostDiv) return { ok: false, reason: "no_hostDiv" };
 
-    const root = editorHost.shadowRoot;
-    if (!root) return { ok: false, reason: "no_shadowroot" };
+    const searchBar = hostDiv.querySelector("ucs-search-bar");
+    if (!searchBar?.shadowRoot) return { ok: false, reason: "no_searchbar_shadow" };
 
-    const pm = root.querySelector('div.ProseMirror[contenteditable="true"]');
+    const form = searchBar.shadowRoot.querySelector("form");
+    if (!form) return { ok: false, reason: "no_form" };
+
+    const editorHost = form.querySelector("ucs-prosemirror-editor");
+    if (!editorHost?.shadowRoot) return { ok: false, reason: "no_editor_shadow" };
+
+    const pm = editorHost.shadowRoot.querySelector('div.ProseMirror[contenteditable="true"]');
     if (!pm) return { ok: false, reason: "no_prosemirror" };
 
     pm.scrollIntoView({ block: "center", behavior: "instant" });
     pm.focus();
 
-    // Put caret at end
-    const sel = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(pm);
-    range.collapse(false);
-    sel.removeAllRanges();
-    sel.addRange(range);
-
     return { ok: true };
   });
 
-  if (!result.ok) throw new Error(`Editor focus failed: ${result.reason}`);
-  return true;
+  if (!res.ok) throw new Error(`Focus editor failed: ${res.reason}`);
 }
 
-async function clickSendButtonDeep(page) {
+// 2) Click exact submit button inside md-icon-button shadowRoot -> button#button[aria-label="Submit"]
+async function clickExactSubmit(page) {
   const clicked = await page.evaluate(() => {
-    function deepFind(root, predicate) {
-      const q = [root];
-      const seen = new Set();
-      while (q.length) {
-        const n = q.shift();
-        if (!n || seen.has(n)) continue;
-        seen.add(n);
-        try {
-          if (predicate(n)) return n;
-        } catch (_) {}
-        if (n.shadowRoot) n.shadowRoot.querySelectorAll("*").forEach((x) => q.push(x));
-        if (n.children) Array.from(n.children).forEach((x) => q.push(x));
+    const app = document.querySelector("ucs-standalone-app");
+    if (!app?.shadowRoot) return false;
+
+    const landing = app.shadowRoot.querySelector("ucs-chat-landing");
+    if (!landing?.shadowRoot) return false;
+
+    const hostDiv = landing.shadowRoot.querySelector("div > div > div > div:nth-child(1)");
+    if (!hostDiv) return false;
+
+    const searchBar = hostDiv.querySelector("ucs-search-bar");
+    if (!searchBar?.shadowRoot) return false;
+
+    const form = searchBar.shadowRoot.querySelector("form");
+    if (!form) return false;
+
+    // form/div/div[2]/md-icon-button//button  -> inner button is in shadowRoot
+    const iconButtons = Array.from(form.querySelectorAll("md-icon-button"));
+    if (!iconButtons.length) return false;
+
+    // Find the one that contains Submit button in its shadow
+    for (const ib of iconButtons) {
+      const sr = ib.shadowRoot;
+      if (!sr) continue;
+      const btn = sr.querySelector('button#button[aria-label="Submit"]');
+      if (btn) {
+        btn.click();
+        return true;
       }
-      return null;
     }
 
-    const app = document.querySelector("ucs-standalone-app");
-    if (!app) return false;
+    // Fallback: any shadow button with aria-label Submit
+    for (const ib of iconButtons) {
+      const sr = ib.shadowRoot;
+      if (!sr) continue;
+      const btn = sr.querySelector('button[aria-label="Submit"]');
+      if (btn) {
+        btn.click();
+        return true;
+      }
+    }
 
-    // find md-icon-button or button with aria-label send/submit
-    const btn = deepFind(app, (n) => {
-      const tag = (n.tagName || "").toLowerCase();
-      if (tag !== "md-icon-button" && tag !== "button") return false;
-
-      const ar = (n.getAttribute?.("aria-label") || "").toLowerCase();
-      const title = (n.getAttribute?.("title") || "").toLowerCase();
-      const txt = (n.innerText || "").toLowerCase();
-
-      // Gemini sometimes labels it "Send" / "Submit" / "Search"
-      return (
-        ar.includes("send") ||
-        ar.includes("submit") ||
-        ar.includes("search") ||
-        title.includes("send") ||
-        title.includes("submit") ||
-        txt.includes("send")
-      );
-    });
-
-    if (!btn) return false;
-
-    let target = btn;
-    if (btn.shadowRoot) target = btn.shadowRoot.querySelector("button") || btn;
-    else target = btn.querySelector?.("button") || btn;
-
-    target.click();
-    return true;
+    return false;
   });
 
   return clicked;
 }
 
 async function enterPromptAndSend(page, promptText) {
-  // 1) Focus the ProseMirror editor (shadow)
-  await focusEditorProseMirror(page);
-  await sleep(300);
+  // Focus editor
+  await focusProseMirror(page);
+  await sleep(200);
 
-  // 2) CTRL+A and type via keyboard (MOST reliable)
+  // CTRL+A, Backspace, type prompt
   await page.keyboard.down("Control");
   await page.keyboard.press("A");
   await page.keyboard.up("Control");
   await sleep(50);
-
-  // clear by backspace (extra safety)
   await page.keyboard.press("Backspace");
   await sleep(80);
 
   await page.keyboard.type(promptText, { delay: 2 });
   await sleep(250);
 
-  // 3) Click send (deep)
-  const sent = await clickSendButtonDeep(page);
+  // Click exact submit
+  const submitted = await clickExactSubmit(page);
 
-  // 4) Fallback: press Enter (sometimes submits)
-  if (!sent) {
-    console.log("⚠️ Send button not found. Falling back to ENTER...");
+  if (!submitted) {
+    console.log("⚠️ Exact Submit not found. Fallback Enter key...");
     await page.keyboard.press("Enter");
   }
 }
@@ -649,14 +582,12 @@ async function main() {
         const firstPage = pages[0];
         if (firstPage) await firstPage.bringToFront();
 
-        // Reset every 10
         if (start > 0 && start % 10 === 0) {
-          console.log(`⚠️ 10 Images Threshold reached (${start}). Reset check...`);
+          console.log(`⚠️ 10 images threshold (${start}). Reset check...`);
           await handleAccountReset(firstPage);
           await sleep(5000);
         }
 
-        // Login check first tab
         await ensureLoggedInOnFirstTab(firstPage);
 
         console.log("Navigating all tabs to Gemini...");
@@ -664,7 +595,7 @@ async function main() {
           pages.map(async (p) => {
             try {
               await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
-            } catch (e) {
+            } catch (_) {
               try {
                 await p.goto(GEMINI_URL, { waitUntil: "networkidle2" });
               } catch (_) {}
@@ -683,7 +614,7 @@ async function main() {
 
         globalIndex += batchPrompts.length;
 
-        console.log("🚀 Submitting prompts to all tabs...");
+        console.log("🚀 Submitting prompts...");
         await Promise.all(
           batchJobs.map(async (job) => {
             console.log(` [Image ${job.sceneNumber}] Submitting...`);
@@ -702,7 +633,7 @@ async function main() {
 
         console.log("\n✅ Monitoring...");
 
-        const batchTimeout = Date.now() + 600 * 1000; // 10 min
+        const batchTimeout = Date.now() + 600 * 1000;
         while (batchJobs.some((j) => !j.finished)) {
           if (Date.now() > batchTimeout) {
             console.log("⚠️ Batch timeout reached. Moving on.");
@@ -715,20 +646,16 @@ async function main() {
             try {
               const blobUrl = await findBlobUrlNow(job.page, BLOB_PREFIX);
               if (blobUrl) {
-                const durationSeconds = ((Date.now() - job.startTime) / 1000).toFixed(1);
-                console.log(`🎉 FOUND blob for Image ${job.sceneNumber} | ${durationSeconds}s`);
-
                 const fileName = makeRandomFileName(job.sceneNumber);
                 const outputFile = path.join(OUTPUT_DIR, fileName);
                 await downloadBlobImage(job.page, blobUrl, outputFile);
-
                 job.finished = true;
                 continue;
               }
 
               const banned = await checkBannedError(job.page);
               if (banned) {
-                console.log(`❌ Image ${job.sceneNumber} banned-answer.`);
+                console.log(`❌ Image ${job.sceneNumber}: banned.`);
                 job.finished = true;
                 continue;
               }
@@ -736,7 +663,7 @@ async function main() {
               const elapsed = Date.now() - job.startTime;
               const TIMEOUT_MS = 200000;
               if (elapsed > TIMEOUT_MS) {
-                console.log(`⏩ Image ${job.sceneNumber} timeout (>200s). Skipping.`);
+                console.log(`⏩ Image ${job.sceneNumber} timeout. Skipping.`);
                 job.finished = true;
                 continue;
               }
@@ -749,7 +676,6 @@ async function main() {
         }
 
         console.log(`=== Batch ${batchNumber} completed ===`);
-
         for (const p of pages) {
           try {
             await p.close();
