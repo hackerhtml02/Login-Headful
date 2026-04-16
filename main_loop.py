@@ -177,5 +177,5 @@ while True:
         except:
             pass
 
-    print("Sleeping 1 hour...\n")
-    time.sleep(3600)
+    print("Sleeping 20 min...\n")
+    time.sleep(1200)
