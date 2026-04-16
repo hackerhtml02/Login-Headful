@@ -1,0 +1,26 @@
+name: Update Token
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"  # har 30 min run
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Encode token
+        run: |
+          echo "${{ secrets.TOKEN_DATA }}" | base64 > tk.txt
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add tk.txt
+          git commit -m "Auto update token"
+          git push
