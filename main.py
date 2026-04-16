@@ -13,7 +13,7 @@ from selenium.webdriver.common.keys import Keys
 # =========================
 EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_TOKEN = os.getenv("GB_TOKEN")
 REPO = os.getenv("REPO")
 FILE_PATH = "tk.txt"
 
