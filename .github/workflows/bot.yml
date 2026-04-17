@@ -25,3 +25,18 @@ jobs:
           GB_TOKEN: ${{ secrets.GB_TOKEN }}
           REPO: ${{ secrets.REPO }}
         run: python main_loop.py
+
+      - name: 🔁 Auto restart workflow after 1 hr
+        env:
+          GB_TOKEN: ${{ secrets.GB_TOKEN }}
+        run: |
+          echo "⏳ Waiting 3600 seconds (1 hr) before restarting..."
+          sleep 3600
+
+          echo "🔄 Re-triggering workflow automatically..."
+
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GB_TOKEN" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches \
+            -d '{"ref":"main"}'
