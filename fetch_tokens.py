@@ -30,14 +30,11 @@ def run_scraper():
     print("🚀 Starting Advanced Stealth Token Extractor...")
     
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new") # Naya headless mode jo asali Chrome jaisa behave karta hai
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    # Real user-agent taake bot detection na ho
     chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    # Performance logging enable karna
     chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
 
     service = Service(ChromeDriverManager().install())
@@ -50,29 +47,21 @@ def run_scraper():
         print("🌍 Opening PDFSimpli...")
         driver.get("https://pdfsimpli.com/app/image-editor/generate")
 
-        # Wait for either the prompt or some body element
         wait = WebDriverWait(driver, 60)
-        
-        # Check if page loaded
-        print(f"📍 Current URL: {driver.current_url}")
-        
-        # Cookie banner ya popups aksar element hide kar dete hain
         time.sleep(10) 
 
         try:
-            # Try finding the prompt input (using multiple possible selectors)
             prompt_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "textarea, input[type='text'], #empty-generate-prompt")))
             print("✍️ Found Input. Entering prompt...")
             prompt_input.send_keys("cinematic realistic cat walking on moon")
             prompt_input.send_keys(Keys.ENTER)
         except:
-            print("⚠️ Prompt element not found. Attempting to capture tokens from initial load...")
+            print("⚠️ Prompt element not found. Attempting load-time capture...")
 
-        print("🔍 Scanning Network Traffic...")
+        print("🔍 Scanning Network Traffic for FULL tokens...")
         
         found = False
-        # 45 seconds scanning
-        for i in range(15):
+        for i in range(20):
             logs = driver.get_log('performance')
             for entry in logs:
                 log = json.loads(entry['message'])['message']
@@ -80,17 +69,19 @@ def run_scraper():
                     url = log['params']['request']['url']
                     headers = log['params']['request']['headers']
                     
-                    # Bearer Token
+                    # 1. Bearer Token Capture
                     if "api/v1" in url and "Authorization" in headers:
                         if not auth_token:
                             auth_token = headers['Authorization']
-                            print(f"💎 Found Bearer: {auth_token[:40]}...")
+                            print(f"💎 Found Bearer (Success)")
 
-                    # SAS Token
+                    # 2. FULL SAS Token Capture (FIXED)
                     if ".png?" in url and "prodlegalsimplistorage" in url:
                         if not sas_token:
-                            sas_token = "?" + url.split(".png?")[1].split("&")[0]
-                            print(f"💎 Found SAS: {sas_token[:40]}...")
+                            # Hum ne .split("&")[0] hata diya hai taake poora URL query milay
+                            sas_token = "?" + url.split(".png?")[1] 
+                            print(f"💎 Found Full SAS Token!")
+                            print(f"DEBUG: {sas_token[:50]}... (Total Length: {len(sas_token)})")
 
                 if auth_token and sas_token:
                     found = True
@@ -101,9 +92,8 @@ def run_scraper():
         if auth_token and sas_token:
             send_to_server(auth_token, sas_token)
         else:
-            # Debug: Screenshot on failure
             driver.save_screenshot("error_debug.png")
-            print("❌ Failed to capture tokens. See error_debug.png in artifacts.")
+            print("❌ Failed to capture complete tokens.")
 
     except Exception as e:
         print(f"⚠️ Fatal Error: {e}")
