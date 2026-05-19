@@ -1,0 +1,44 @@
+name: Auto Update SeeDream Tokens (Loop)
+
+on:
+  workflow_dispatch: # Isko sirf ek baar manual start karna hoga
+
+jobs:
+  update-tokens-loop:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests cloudscraper
+
+      - name: Run Token Fetcher
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: python fetch_tokens.py
+
+      - name: 🔁 Auto restart workflow after 1 hr
+        env:
+          # GitHub ka apna default token loop block karta hai, isliye custom PAT zaroori hai
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "⏳ Waiting 3600 seconds (1 hr) before restarting..."
+          sleep 3600
+
+          echo "🔄 Re-triggering workflow automatically..."
+
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/seedream_loop.yml/dispatches \
+            -d '{"ref":"main"}'
