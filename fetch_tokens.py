@@ -1,91 +1,109 @@
 import os
-import requests
-import cloudscraper
 import json
 import time
+import requests
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
-# GitHub Secrets se variables uthayega
-APP_URL = os.environ.get("APP_URL", "https://yourwebsite.com") # e.g., https://elevenchime.com
+# Environment Variables
+APP_URL = os.environ.get("APP_URL", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-def fetch_seedream_tokens():
-    print("🚀 Starting SeeDream (PDFSimpli) Token Extraction...")
-    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-    
-    bearer_token = ""
-    sas_token = ""
+def send_to_server(bearer, sas):
+    if not APP_URL:
+        print("❌ Error: APP_URL is not set.")
+        return
+    print(f"🌐 Sending tokens to {APP_URL}...")
+    webhook_url = f"{APP_URL.rstrip('/')}/api/admin/auto-update-seedream"
+    payload = {"bearer_token": bearer, "sas_token": sas}
+    headers = {"Content-Type": "application/json", "X-Cron-Secret": ADMIN_PASSWORD}
     
     try:
-        # 1. Generate Guest Session & Bearer Token
-        auth_url = "https://api.worksimpli.io/api/v1/auth/guest"
-        headers = {
-            "Accept": "application/json",
-            "Origin": "https://pdfsimpli.com",
-            "Referer": "https://pdfsimpli.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        
-        print("Fetching Guest Bearer Token...")
-        auth_res = scraper.post(auth_url, headers=headers, json={}, timeout=30)
-        
-        if auth_res.status_code == 200:
-            auth_data = auth_res.json()
-            token = auth_data.get("token")
-            if token:
-                bearer_token = f"Bearer {token}"
-                print("✅ Bearer Token Found!")
-        
-        if not bearer_token:
-            print("❌ Failed to get Bearer Token.")
-            return
-
-        # 2. Get SAS Token (Using the Bearer Token)
-        # Typically PDFSimpli returns SAS token when initiating a document or profile endpoint
-        profile_url = "https://api.worksimpli.io/api/v1/user/profile"
-        headers["Authorization"] = bearer_token
-        
-        print("Fetching SAS Token...")
-        prof_res = scraper.get(profile_url, headers=headers, timeout=30)
-        
-        if prof_res.status_code == 200:
-            prof_data = prof_res.json()
-            sas_token = prof_data.get("sasToken", "")
-            if not sas_token:
-                # Fallback: Agar direct profile me nahi mila, to general config api check karein
-                config_url = "https://api.worksimpli.io/api/v1/config"
-                conf_res = scraper.get(config_url, headers=headers)
-                sas_token = conf_res.json().get("sasToken", "")
-
-            if sas_token:
-                print("✅ SAS Token Found!")
-        
-        if bearer_token and sas_token:
-            send_to_server(bearer_token, sas_token)
+        res = requests.post(webhook_url, json=payload, headers=headers, timeout=30)
+        if res.status_code == 200:
+            print("🎉 Successfully updated tokens on the server!")
         else:
-            print("❌ Could not extract both tokens.")
-            
+            print(f"❌ Server rejected update: {res.status_code}")
     except Exception as e:
-        print(f"⚠️ Error occurred during extraction: {e}")
+        print(f"❌ Failed to send update: {e}")
 
-def send_to_server(bearer, sas):
-    print(f"🌐 Sending tokens to {APP_URL} ...")
-    webhook_url = f"{APP_URL.rstrip('/')}/api/admin/auto-update-seedream"
+def run_scraper():
+    print("🚀 Starting Selenium Token Extractor...")
     
-    payload = {
-        "bearer_token": bearer,
-        "sas_token": sas
-    }
-    
-    headers = {
-        "Content-Type": "application/json",
-        "X-Cron-Secret": ADMIN_PASSWORD  # Yeh apke app.py ko secure karega
-    }
-    
-    res = requests.post(webhook_url, json=payload, headers=headers)
-    if res.status_code == 200:
-        print("🎉 Successfully updated tokens on the server!")
-    else:
-        print(f"❌ Server rejected the update. Status: {res.status_code}, Response: {res.text}")
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")  # GitHub Actions ke liye zaroori
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    auth_token = None
+    sas_token = None
+
+    try:
+        print("🌍 Opening PDFSimpli...")
+        driver.get("https://pdfsimpli.com/app/image-editor/generate")
+
+        wait = WebDriverWait(driver, 40)
+        # Element ka wait
+        prompt_input = wait.until(EC.presence_of_element_located((By.ID, "empty-generate-prompt")))
+
+        print("✍️ Entering prompt to trigger API...")
+        prompt_input.send_keys("a beautiful cinematic landscape")
+        prompt_input.send_keys(Keys.ENTER)
+
+        print("🔍 Monitoring Network Logs...")
+        
+        found = False
+        # 60 seconds tak loop chalayenge jab tak dono cheezein na mil jayein
+        for i in range(30):
+            logs = driver.get_log('performance')
+            for entry in logs:
+                log = json.loads(entry['message'])['message']
+                
+                if log['method'] == 'Network.requestWillBeSent':
+                    url = log['params']['request']['url']
+                    headers = log['params']['request']['headers']
+                    
+                    # 1. Authorization Header Dhoondna
+                    if "api/v1/imagegeneration" in url and "Authorization" in headers:
+                        if not auth_token:
+                            auth_token = headers['Authorization']
+                            print(f"✅ Found Bearer Token: {auth_token[:30]}...")
+
+                    # 2. SAS Token Dhoondna
+                    if ".png?" in url and "prodlegalsimplistorage" in url:
+                        if not sas_token:
+                            sas_token = "?" + url.split(".png?")[1]
+                            # Clean SAS token (if there are extra chars)
+                            if "&" in sas_token:
+                                sas_token = sas_token.split("&")[0] # Sirf zaroori hissa lein
+                            print(f"✅ Found SAS Token: {sas_token[:30]}...")
+
+                if auth_token and sas_token:
+                    found = True
+                    break
+            
+            if found: break
+            time.sleep(3)
+
+        if auth_token and sas_token:
+            send_to_server(auth_token, sas_token)
+        else:
+            print("❌ Failed to capture tokens. Timing out.")
+
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+    finally:
+        driver.quit()
 
 if __name__ == "__main__":
-    fetch_seedream_tokens()
+    run_scraper()
