@@ -1,4 +1,4 @@
-name: Loop Bot
+name: Loop
 
 on:
   workflow_dispatch:
